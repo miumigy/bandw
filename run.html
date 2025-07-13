@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stick-Figure Running Animation</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+  </style>
+</head>
+<body>
+  <!-- Three.js r128 CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // --- Color constants ---
+    const DARK_COLOR   = 0x666666;   // Color for Runner 1 (dark)
+    const NORMAL_COLOR = 0xffffff;   // Color for Runner 2 (bright)
+
+    // -------------------------------------------------
+    // Generate horizontal-stripe texture for background
+    function createStripeTexture() {
+      const canvas = document.createElement('canvas');
+      canvas.width  = 512;
+      canvas.height = 2048;
+      const ctx = canvas.getContext('2d');
+
+      ctx.fillStyle = "#777777";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const stripeHeight = 2;
+      const gapHeight    = 20;
+      const totalHeight  = stripeHeight + gapHeight;
+      for (let y = 0; y < canvas.height; y += totalHeight) {
+        ctx.fillStyle = "#FFFFFF";
+        ctx.fillRect(0, y, canvas.width, stripeHeight);
+      }
+
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.wrapS = THREE.RepeatWrapping;
+      texture.wrapT = THREE.RepeatWrapping;
+      texture.repeat.set(1, 50 / canvas.height * totalHeight);   // vertical tiling
+      return texture;
+    }
+    // -------------------------------------------------
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    // ----- Camera -----
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
+    let cameraDistance = 10;
+    const allowedAngles = [45, 90, 135, 180, -135, -90, -45, 0];
+    let cameraAngle = 45;
+    const cameraAngleCounts = {"45": 1, "90": 0, "135": 0, "180": 0, "-135": 0, "-90": 0, "-45": 0, "0": 0};
+    camera.position.set(0, 5, 10);
+    // Gaze point is fixed (y = 1.5)
+    camera.lookAt(new THREE.Vector3(0, 1.5, 0));
+
+    const renderer = new THREE.WebGLRenderer({antialias: true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    // ----- Lighting -----
+    const ambientLight = new THREE.AmbientLight(0x404040, 1);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(5, 10, 7.5);
+    directionalLight.castShadow = true;
+    directionalLight.shadow.mapSize.width  = 2048;
+    directionalLight.shadow.mapSize.height = 2048;
+    directionalLight.shadow.bias = -0.005;
+    directionalLight.shadow.camera.near = 0.5;
+    directionalLight.shadow.camera.far  = 500;
+    directionalLight.shadow.camera.left   = -50;
+    directionalLight.shadow.camera.right  = 50;
+    directionalLight.shadow.camera.top    = 50;
+    directionalLight.shadow.camera.bottom = -50;
+    scene.add(directionalLight);
+
+    // ----- Road -----
+    const roadTexture  = createStripeTexture();
+    const roadMaterial = new THREE.MeshLambertMaterial({map: roadTexture});
+
+    const segmentLength = 50;
+    const roadMinOffset = -300;
+    const roadMaxOffset = 300;
+
+    // Road width doubled (width = 4)
+    function createRoadSegment(zCenter) {
+      const geometry = new THREE.BoxGeometry(4, 0.05, segmentLength);
+      const segment  = new THREE.Mesh(geometry, roadMaterial);
+      // Road spans x = −2 … 2
+      segment.position.set(0, 0.01, zCenter);
+      scene.add(segment);
+      return segment;
+    }
+    const roadSegments = [];
+
+    // -------------------------------------------------
+    // Stick-figure generator (returns elbow groups, etc.)
+    function createStickFigure(materialSet, initX) {
+      const group = new THREE.Group();
+      group.position.set(initX, 0, 0);
+      group.rotation.x = THREE.Math.degToRad(10);
+      
+      // Head
+      const headGeo  = new THREE.SphereGeometry(0.21, 16, 16);
+      const headMesh = new THREE.Mesh(headGeo, materialSet.head);
+      headMesh.position.set(0, 2.5, 0);
+      headMesh.castShadow = true;
+      group.add(headMesh);
+      
+      // Torso
+      const torsoGeo  = new THREE.BoxGeometry(0.6, 1, 0.3);
+      const torsoMesh = new THREE.Mesh(torsoGeo, materialSet.torso);
+      torsoMesh.position.set(0, 1.75, 0);
+      torsoMesh.castShadow = true;
+      group.add(torsoMesh);
+      
+      // ---- Arms ----
+      function createArm(material) {
+        const armGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.35, 16);
+        armGeo.translate(0, -0.35/2, 0);
+        const armMesh = new THREE.Mesh(armGeo, material);
+        armMesh.castShadow = true;
+        return armMesh;
+      }
+      // Left arm
+      const leftArmGroup = new THREE.Group();
+      leftArmGroup.position.set(-0.35, 2, 0);
+      const leftUpperArm = createArm(materialSet.arm);
+      leftArmGroup.add(leftUpperArm);
+      const leftElbowGroup = new THREE.Group();
+      leftElbowGroup.position.set(0, -0.35, 0);
+      const leftLowerArm = createArm(materialSet.arm);
+      leftElbowGroup.add(leftLowerArm);
+      leftArmGroup.add(leftElbowGroup);
+      group.add(leftArmGroup);
+      
+      // Right arm
+      const rightArmGroup = new THREE.Group();
+      rightArmGroup.position.set(0.35, 2, 0);
+      const rightUpperArm = createArm(materialSet.arm);
+      rightArmGroup.add(rightUpperArm);
+      const rightElbowGroup = new THREE.Group();
+      rightElbowGroup.position.set(0, -0.35, 0);
+      const rightLowerArm = createArm(materialSet.arm);
+      rightElbowGroup.add(rightLowerArm);
+      rightArmGroup.add(rightElbowGroup);
+      group.add(rightArmGroup);
+      
+      // ---- Legs ----
+      function createLeg(material) {
+        const upperLegGeo = new THREE.BoxGeometry(0.25, 0.5, 0.25);
+        upperLegGeo.translate(0, -0.5/2, 0);
+        const upperLeg = new THREE.Mesh(upperLegGeo, material);
+        upperLeg.castShadow = true;
+
+        const lowerLegGeo = new THREE.BoxGeometry(0.25, 0.5, 0.25);
+        lowerLegGeo.translate(0, -0.5/2, 0);
+        const lowerLeg = new THREE.Mesh(lowerLegGeo, material);
+        lowerLeg.castShadow = true;
+        return { upperLeg, lowerLeg };
+      }
+      // Left leg
+      const leftLegGroup = new THREE.Group();
+      leftLegGroup.position.set(-0.15, 1, 0);
+      const leftLeg = createLeg(materialSet.leg);
+      leftLegGroup.add(leftLeg.upperLeg);
+      const leftKneeGroup = new THREE.Group();
+      leftKneeGroup.position.set(0, -0.5, 0);
+      leftKneeGroup.add(leftLeg.lowerLeg);
+      leftLegGroup.add(leftKneeGroup);
+      group.add(leftLegGroup);
+      
+      // Right leg
+      const rightLegGroup = new THREE.Group();
+      rightLegGroup.position.set(0.15, 1, 0);
+      const rightLeg = createLeg(materialSet.leg);
+      rightLegGroup.add(rightLeg.upperLeg);
+      const rightKneeGroup = new THREE.Group();
+      rightKneeGroup.position.set(0, -0.5, 0);
+      rightKneeGroup.add(rightLeg.lowerLeg);
+      rightLegGroup.add(rightKneeGroup);
+      group.add(rightLegGroup);
+      
+      return {
+        group,
+        headMesh,
+        leftArmGroup,
+        rightArmGroup,
+        leftElbowGroup,
+        rightElbowGroup,
+        leftLegGroup,
+        rightLegGroup,
+        leftKneeGroup,
+        rightKneeGroup
+      };
+    }
+    // -------------------------------------------------
+
+    // Material sets: Runner 1 dark, Runner 2 bright
+    const person1Materials = {
+      head : new THREE.MeshLambertMaterial({color: DARK_COLOR}),
+      torso: new THREE.MeshLambertMaterial({color: DARK_COLOR}),
+      arm  : new THREE.MeshLambertMaterial({color: DARK_COLOR}),
+      leg  : new THREE.MeshLambertMaterial({color: DARK_COLOR})
+    };
+
+    const person2Materials = {
+      head : new THREE.MeshLambertMaterial({color: NORMAL_COLOR}),
+      torso: new THREE.MeshLambertMaterial({color: NORMAL_COLOR}),
+      arm  : new THREE.MeshLambertMaterial({color: NORMAL_COLOR}),
+      leg  : new THREE.MeshLambertMaterial({color: NORMAL_COLOR})
+    };
+
+    // Runner 1 (dark) at x = 1
+    const stickFigureData = createStickFigure(person1Materials, 1);
+    const stickFigure     = stickFigureData.group;
+    scene.add(stickFigure);
+
+    // Runner 2 (bright) at x = −1
+    const secondStickFigureData = createStickFigure(person2Materials, -1);
+    const secondStickFigure     = secondStickFigureData.group;
+    scene.add(secondStickFigure);
+
+    // ---------- Road initialization ----------
+    function initRoadSegments() {
+      const startZ = stickFigure.position.z + roadMinOffset;
+      const endZ   = stickFigure.position.z + roadMaxOffset;
+      for (let z = startZ + segmentLength/2; z < endZ; z += segmentLength) {
+        const segment = createRoadSegment(z);
+        roadSegments.push(segment);
+      }
+    }
+    initRoadSegments();
+
+    function getCurrentState() {
+      if (isPaused)                  return "paused";
+      else if (pendulumSpeedFactor === 3.0) return "fast";
+      else                             return "normal";
+    }
+
+    // ----- Animation parameters -----
+    let pendulumSpeedFactor = 3.0;   // Pendulum speed ×1.5
+    let lastTapTime   = performance.now();
+    let isPaused      = false;
+    let pauseRequested = false;
+    let runningTime   = 0;
+    const clock       = new THREE.Clock();
+    const runSpeed    = 3.0;
+    const jumpAmplitude = 0.25;      // Max jump height
+
+    // Random speed modifier for each runner (updates every second)
+    let speedModifier1 = 1.0;
+    let speedModifier2 = 1.0;
+    setInterval(() => {
+      speedModifier1 = 0.95 + Math.random() * 0.1;
+      speedModifier2 = 0.95 + Math.random() * 0.1;
+    }, 1000);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      const now   = performance.now();
+
+      // ---- Auto camera-angle switch after 10 s of no tap ----
+      if (now - lastTapTime > 10000) {
+        const candidates = allowedAngles.filter(angle => angle !== cameraAngle);
+        let minCount = Infinity;
+        candidates.forEach(angle => {
+          const key = angle.toString();
+          if (cameraAngleCounts[key] < minCount) minCount = cameraAngleCounts[key];
+        });
+        const minCandidates = candidates.filter(angle => cameraAngleCounts[angle.toString()] === minCount);
+        const randomIndex   = Math.floor(Math.random() * minCandidates.length);
+        const selectedAngle = minCandidates[randomIndex];
+        cameraAngle = selectedAngle;
+        cameraAngleCounts[cameraAngle.toString()] += 1;
+        lastTapTime = now;
+      }
+
+      if (!isPaused) {
+        // ---- Runner animation ----
+        runningTime += delta;
+        const cycle = runningTime * runSpeed * pendulumSpeedFactor;
+        const swing = Math.sin(cycle);
+        const jointBend = Math.abs(Math.sin(cycle));
+        const phaseOffset = Math.PI / 4;               // For Runner 2
+        const swing2 = Math.sin(cycle + phaseOffset);
+        const jointBend2 = Math.abs(Math.sin(cycle + phaseOffset));
+
+        // Arms (×2 amplitude)
+        stickFigureData.leftArmGroup.rotation.x  =  1.2 * swing;
+        stickFigureData.leftElbowGroup.rotation.x = -1.2 * jointBend;
+        stickFigureData.rightArmGroup.rotation.x = -1.2 * swing;
+        stickFigureData.rightElbowGroup.rotation.x = -1.2 * jointBend;
+
+        secondStickFigureData.leftArmGroup.rotation.x  =  1.2 * swing2;
+        secondStickFigureData.leftElbowGroup.rotation.x = -1.2 * jointBend2;
+        secondStickFigureData.rightArmGroup.rotation.x = -1.2 * swing2;
+        secondStickFigureData.rightElbowGroup.rotation.x = -1.2 * jointBend2;
+
+        // Legs (×2 amplitude, alternating)
+        stickFigureData.leftLegGroup.rotation.x  = -1.2 * swing;
+        stickFigureData.leftKneeGroup.rotation.x =  1.2 * jointBend;
+        stickFigureData.rightLegGroup.rotation.x =  1.2 * swing;
+        stickFigureData.rightKneeGroup.rotation.x = 1.2 * jointBend;
+
+        secondStickFigureData.leftLegGroup.rotation.x  = -1.2 * swing2;
+        secondStickFigureData.leftKneeGroup.rotation.x =  1.2 * jointBend2;
+        secondStickFigureData.rightLegGroup.rotation.x =  1.2 * swing2;
+        secondStickFigureData.rightKneeGroup.rotation.x = 1.2 * jointBend2;
+
+        // Jump (Runner 1 normal; Runner 2 phase-shifted)
+        const phase1 = cycle % Math.PI;
+        const jump1  = jumpAmplitude * Math.sin(phase1);
+        stickFigure.position.y = jump1;
+
+        const phase2 = (cycle + phaseOffset) % Math.PI;
+        const jump2  = jumpAmplitude * Math.sin(phase2);
+        secondStickFigure.position.y = jump2;
+
+        // Scroll the ground
+        const groundScrollSpeed = runSpeed * 2;
+        stickFigure.position.z         += groundScrollSpeed * speedModifier1 * delta;
+        secondStickFigure.position.z   += groundScrollSpeed * speedModifier2 * delta;
+      }
+
+      // ----- Camera -----
+      const rad = THREE.Math.degToRad(cameraAngle);
+      camera.position.x = stickFigure.position.x + cameraDistance * Math.sin(rad);
+      camera.position.y = 5;
+      camera.position.z = stickFigure.position.z + cameraDistance * Math.cos(rad);
+      const focusX = (stickFigure.position.x + secondStickFigure.position.x) / 2;
+      const focusZ = (stickFigure.position.z + secondStickFigure.position.z) / 2;
+      camera.lookAt(focusX, 1.5, focusZ);
+
+      // ----- Update road segments -----
+      while (roadSegments.length > 0 && (roadSegments[0].position.z + segmentLength/2 < stickFigure.position.z + roadMinOffset)) {
+        const seg = roadSegments.shift();
+        scene.remove(seg);
+      }
+      if (roadSegments.length > 0) {
+        let lastSegment = roadSegments[roadSegments.length - 1];
+        while (lastSegment.position.z + segmentLength/2 < stickFigure.position.z + roadMaxOffset) {
+          const newZ = lastSegment.position.z + segmentLength;
+          const newSegment = createRoadSegment(newZ);
+          roadSegments.push(newSegment);
+          lastSegment = newSegment;
+        }
+      } else {
+        const segment = createRoadSegment(stickFigure.position.z + roadMinOffset + segmentLength/2);
+        roadSegments.push(segment);
+      }
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    // Tap: left / right half → camera angle change
+    document.body.addEventListener('click', (event) => {
+      lastTapTime = performance.now();
+      const x = event.clientX;
+      const width = window.innerWidth;
+      if (x < width/2) {
+        let index = allowedAngles.indexOf(cameraAngle);
+        index = (index - 1 + allowedAngles.length) % allowedAngles.length;
+        cameraAngle = allowedAngles[index];
+        cameraAngleCounts[cameraAngle.toString()] += 1;
+      } else {
+        let index = allowedAngles.indexOf(cameraAngle);
+        index = (index + 1) % allowedAngles.length;
+        cameraAngle = allowedAngles[index];
+        cameraAngleCounts[cameraAngle.toString()] += 1;
+      }
+    });
+
+    // Resize handler
+    window.addEventListener('resize', () => {
+      const width  = window.innerWidth;
+      const height = window.innerHeight;
+      renderer.setSize(width, height);
+      camera.aspect = width/height;
+      camera.updateProjectionMatrix();
+    });
+  </script>
+</body>
+</html>
