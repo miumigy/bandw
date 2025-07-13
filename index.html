@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>The Plastic World in Black & White</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <style>
+    body {
+      margin: 0;
+      font-family: sans-serif;
+      background: #fff;
+      color: #000;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2em;
+    }
+    h1 {
+      font-size: 2.5em;
+      margin-bottom: 0.2em;
+    }
+    p {
+      max-width: 600px;
+      text-align: center;
+      line-height: 1.5;
+    }
+    .gallery {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      margin-top: 2em;
+    }
+    .card {
+      background: #000;
+      color: #fff;
+      border: 1px solid #333;
+      margin: 1em;
+      padding: 1em;
+      width: 240px;
+      text-align: center;
+      transition: transform 0.2s ease;
+    }
+    .card:hover {
+      transform: scale(1.05);
+    }
+    a {
+      color: #fff;
+      text-decoration: none;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <h1>The Plastic World in Black & White</h1>
+  <p>
+    A collection of minimalist 3D animations, exploring motion and form through the interplay of light and shadow. Each piece captures a moment in a world rendered only in black and white.
+  </p>
+
+  <div class="gallery">
+    <div class="card">
+      <a href="cube.html" target="_blank">
+        Rotating Box with Ball
+      </a>
+    </div>
+    <div class="card">
+      <a href="ramp.html" target="_blank">
+        Ball on a Ramp
+      </a>
+    </div>
+    <div class="card">
+      <a href="stair.html" target="_blank">
+        Rubber Ball Climbing Stairs
+      </a>
+    </div>
+    <div class="card">
+      <a href="domino.html" target="_blank">
+        Endless Domino Collapse
+      </a>
+    </div>
+    <div class="card">
+      <a href="fish.html" target="_blank">
+        Fish Swimming Undersea
+      </a>
+    </div>
+    <div class="card">
+      <a href="bird.html" target="_blank">
+        Bird Flying Over Land
+      </a>
+    </div>
+    <div class="card">
+      <a href="run.html" target="_blank">
+        Human Running Straight
+      </a>
+    </div>
+    <div class="card">
+      <a href="drive.html" target="_blank">
+        Car Running on a Track
+      </a>
+    </div>
+    <div class="card">
+      <a href="missile.html" target="_blank">
+        Missile Engagement
+      </a>
+    </div>
+  </div>
+
+  <footer style="margin-top: 3em; font-size: 0.9em; color: #666;">
+    All scenes rendered in pure black and white by Three.js
+  </footer>
+</body>
+</html>
