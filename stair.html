@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>White and Black Balls Climbing Two Rows of Stairs</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+  </style>
+</head>
+<body>
+  <!-- Load the Three.js library -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // --- Scene, Camera, Renderer setup ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+    
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.appendChild(renderer.domElement);
+    
+    // --- Lighting setup ---
+    const ambientLight = new THREE.AmbientLight(0xaaaaaa);
+    scene.add(ambientLight);
+    
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(10, 20, 10);
+    directionalLight.castShadow = true;
+    directionalLight.shadow.mapSize.width = 2048;
+    directionalLight.shadow.mapSize.height = 2048;
+    directionalLight.shadow.camera.near   = 0.5;
+    directionalLight.shadow.camera.far    = 1000;
+    directionalLight.shadow.camera.left  = -50;
+    directionalLight.shadow.camera.right = 50;
+    directionalLight.shadow.camera.top   = 50;
+    directionalLight.shadow.camera.bottom= -50;
+    scene.add(directionalLight);
+    
+    const lightTarget = new THREE.Object3D();
+    scene.add(lightTarget);
+    directionalLight.target = lightTarget;
+    
+    // --- Stair (step) configuration ---
+    const stepWidth  = 2, 
+          stepHeight = 0.5, 
+          stepDepth  = 4;
+    const whiteSteps = []; // for white stairs
+    const blackSteps = []; // for black stairs
+    
+    function createStep(n, offsetX) {
+      const geometry = new THREE.BoxGeometry(stepWidth, stepHeight, stepDepth);
+      const step = new THREE.Mesh(geometry, [
+        new THREE.MeshLambertMaterial({ color: 0x888888, side: THREE.FrontSide }),
+        new THREE.MeshLambertMaterial({ color: 0x888888, side: THREE.FrontSide }),
+        new THREE.MeshLambertMaterial({ color: 0xaaaaaa, side: THREE.FrontSide }),
+        new THREE.MeshLambertMaterial({ color: 0x888888, side: THREE.FrontSide }),
+        new THREE.MeshLambertMaterial({ color: 0x555555, side: THREE.FrontSide }),
+        new THREE.MeshLambertMaterial({ color: 0x888888, side: THREE.FrontSide })
+      ]);
+      step.position.set(offsetX, n * stepHeight, -n * stepDepth);
+      step.receiveShadow = true;
+      return step;
+    }
+    
+    const initialSteps = 100;
+    for (let i = 0; i < initialSteps; i++) {
+      const step = createStep(i, 0);
+      scene.add(step);
+      whiteSteps.push(step);
+    }
+    const blackOffsetX = 3;
+    for (let i = 0; i < initialSteps; i++) {
+      const step = createStep(i, blackOffsetX);
+      scene.add(step);
+      blackSteps.push(step);
+    }
+    
+    // --- Sphere creation ---
+    const sphereRadius = 0.4;
+    const whiteSphereGeometry = new THREE.SphereGeometry(sphereRadius, 32, 32);
+    const whiteSphereMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    const whiteBall = new THREE.Mesh(whiteSphereGeometry, whiteSphereMaterial);
+    whiteBall.castShadow = true;
+    scene.add(whiteBall);
+    
+    const blackSphereGeometry = new THREE.SphereGeometry(sphereRadius, 32, 32);
+    const blackSphereMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
+    const blackBall = new THREE.Mesh(blackSphereGeometry, blackSphereMaterial);
+    blackBall.castShadow = true;
+    scene.add(blackBall);
+    
+    // --- Camera offset candidates ---
+    const possibleCameraOffsets = [];
+    const offsetDistance = 12;
+    const offsetY = 3;
+    for (let i = 0; i < 8; i++){
+      const angle = i * (Math.PI / 4);
+      possibleCameraOffsets.push(new THREE.Vector3(
+        offsetDistance * Math.sin(angle),
+        offsetY,
+        offsetDistance * Math.cos(angle)
+      ));
+    }
+    let currentCameraIndex = 0;
+    let cameraOffset = possibleCameraOffsets[currentCameraIndex].clone();
+    
+    const cameraSelectionCounts = new Array(8).fill(0);
+    cameraSelectionCounts[currentCameraIndex] = 1;
+    
+    let lastCameraChangeStep = 0;
+    
+    window.addEventListener('pointerdown', (e) => {
+      if (e.clientX > window.innerWidth / 2) {
+        currentCameraIndex = (currentCameraIndex + 1) % 8;
+      } else {
+        currentCameraIndex = (currentCameraIndex + 7) % 8;
+      }
+      cameraOffset = possibleCameraOffsets[currentCameraIndex].clone();
+      cameraSelectionCounts[currentCameraIndex]++;
+      // If using average progress to trigger change, update here
+      lastCameraChangeStep = averageProgress;
+    });
+    
+    // --- Speed & progress parameters (independent per ball) ---
+    const baseSpeed = 1;
+    let whiteSpeed = baseSpeed, blackSpeed = baseSpeed;
+    let whiteProgress = 0, blackProgress = 0;
+    let whiteLastJump = 0, blackLastJump = 0;
+    const bounceAmplitude = 0.5;
+    let lastTime = performance.now() / 1000;
+    
+    // --- Light follow offset ---
+    const lightOffset = new THREE.Vector3(10, 20, 10);
+    
+    let averageProgress = 0;
+    
+    function animate() {
+      requestAnimationFrame(animate);
+      
+      const currentTime = performance.now() / 1000;
+      const dt = currentTime - lastTime;
+      lastTime = currentTime;
+      
+      whiteProgress += dt * whiteSpeed;
+      blackProgress += dt * blackSpeed;
+      
+      // Random accelerate/decelerate after each ball’s jump
+      const newWhiteJump = Math.floor(whiteProgress);
+      if (newWhiteJump > whiteLastJump) {
+        whiteLastJump = newWhiteJump;
+        whiteSpeed = baseSpeed * (1 + (Math.random() * 0.1 - 0.05));
+      }
+      const newBlackJump = Math.floor(blackProgress);
+      if (newBlackJump > blackLastJump) {
+        blackLastJump = newBlackJump;
+        blackSpeed = baseSpeed * (1 + (Math.random() * 0.1 - 0.05));
+      }
+      
+      // Individual bounce calculation
+      const whiteFrac = whiteProgress % 1;
+      const blackFrac = blackProgress % 1;
+      const bounceWhite = bounceAmplitude * Math.abs(Math.sin(Math.PI * whiteFrac));
+      const bounceBlack = bounceAmplitude * Math.abs(Math.sin(Math.PI * blackFrac));
+      
+      // Update positions for each ball
+      const whiteY = whiteProgress * stepHeight + sphereRadius + bounceWhite;
+      const whiteZ = -whiteProgress * stepDepth;
+      whiteBall.position.set(0, whiteY, whiteZ);
+      
+      const blackY = blackProgress * stepHeight + sphereRadius + bounceBlack;
+      const blackZ = -blackProgress * stepDepth;
+      blackBall.position.set(blackOffsetX, blackY, blackZ);
+      
+      // Individual squash & stretch calculation
+      const threshold = 0.2 * bounceAmplitude;
+      const tWhite = 1 - Math.min(Math.max(bounceWhite / threshold, 0), 1);
+      const tBlack = 1 - Math.min(Math.max(bounceBlack / threshold, 0), 1);
+      const scaleYWhite   = 1 - 0.3 * tWhite;
+      const scaleXZWhite  = 1 + 0.3 * tWhite;
+      whiteBall.scale.set(scaleXZWhite, scaleYWhite, scaleXZWhite);
+      
+      const scaleYBlack   = 1 - 0.3 * tBlack;
+      const scaleXZBlack  = 1 + 0.3 * tBlack;
+      blackBall.scale.set(scaleXZBlack, scaleYBlack, scaleXZBlack);
+      
+      // Auto-add steps as needed
+      if (whiteSteps.length < whiteProgress + 50) {
+        const newIndex = whiteSteps.length;
+        const newStep = createStep(newIndex, 0);
+        scene.add(newStep);
+        whiteSteps.push(newStep);
+      }
+      if (blackSteps.length < blackProgress + 50) {
+        const newIndex = blackSteps.length;
+        const newStep = createStep(newIndex, blackOffsetX);
+        scene.add(newStep);
+        blackSteps.push(newStep);
+      }
+      
+      averageProgress = (whiteProgress + blackProgress) / 2;
+      if (averageProgress - lastCameraChangeStep >= 10) {
+        let candidates = [];
+        let minCount = Infinity;
+        for (let i = 0; i < 8; i++) {
+          if (i === currentCameraIndex) continue;
+          if (cameraSelectionCounts[i] < minCount) {
+            minCount = cameraSelectionCounts[i];
+            candidates = [i];
+          } else if (cameraSelectionCounts[i] === minCount) {
+            candidates.push(i);
+          }
+        }
+        const randomCandidate = candidates[Math.floor(Math.random() * candidates.length)];
+        currentCameraIndex = randomCandidate;
+        cameraOffset = possibleCameraOffsets[currentCameraIndex].clone();
+        cameraSelectionCounts[currentCameraIndex]++;
+        lastCameraChangeStep = averageProgress;
+      }
+      
+      // Camera looks at midpoint of both balls
+      const midpoint = new THREE.Vector3().addVectors(whiteBall.position, blackBall.position).multiplyScalar(0.5);
+      camera.position.copy(midpoint).add(cameraOffset);
+      camera.lookAt(midpoint);
+      
+      directionalLight.position.copy(whiteBall.position).add(lightOffset);
+      lightTarget.position.copy(whiteBall.position);
+      directionalLight.target.updateMatrixWorld();
+      
+      renderer.render(scene, camera);
+    }
+    animate();
+    
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
