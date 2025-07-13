@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Infinite Domino Simulation</title>
+  <style>
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!-- Load three.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    // -----------------------------
+    // Scene, Camera, Renderer Initialization
+    // -----------------------------
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+    const normalOffset = new THREE.Vector3(0, 4, -10);
+    camera.position.copy(normalOffset);
+    camera.lookAt(0, 0, 0);
+    scene.add(camera);
+
+    const renderer = new THREE.WebGLRenderer({antialias: true});
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.localClippingEnabled = true;
+    document.body.appendChild(renderer.domElement);
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // -----------------------------
+    // Camera Control Parameters
+    // -----------------------------
+    let cameraRotation = 0;
+    const possibleAngles = [0, Math.PI/4, Math.PI/2, 3*Math.PI/4, Math.PI, -3*Math.PI/4, -Math.PI/2, -Math.PI/4];
+    const randomAngleCounts = {};
+    possibleAngles.forEach(angle => {
+      randomAngleCounts[angle.toFixed(5)] = (Math.abs(angle) < 0.00001) ? 1 : 0;
+    });
+    let lastInteractionTime = 0;
+
+    // -----------------------------
+    // Global Clock & Simulation Variables
+    // -----------------------------
+    const clockGlobal = new THREE.Clock();
+    let lastFrameTime = clockGlobal.getElapsedTime();
+    let chainProgress = 0;
+    const fixedTimeStep = 1/60;
+    let accumulator = 0;
+    let simulationPaused = false;
+    const chainSpeedMultiplier = 5.0;
+
+    // -----------------------------
+    // Domino Parameters
+    // -----------------------------
+    const dominoWidth = 0.5;
+    const dominoHeight = 1.0;
+    const dominoDepth = 0.1;
+    const dominoSpacing = dominoHeight * 0.95;
+
+    const fallingSpeed = 8.0;
+    const maxRotation = Math.acos(dominoDepth/dominoHeight);
+
+    // -----------------------------
+    // Chain Propagation & Camera Speed Adjustment
+    // -----------------------------
+    const contactAngle = Math.asin(dominoSpacing/dominoHeight);
+    const correctionFactor = 1.176526;
+    const waveSpeed = (dominoSpacing * fallingSpeed) / contactAngle;
+    const correctedWaveSpeed = waveSpeed * correctionFactor;
+    const triggerAngle = contactAngle / correctionFactor;
+
+    // -----------------------------
+    // Shared Geometry & Materials (Reversed Colors for Left/Right)
+    // -----------------------------
+    const dominoGeometryA = new THREE.BoxGeometry(dominoWidth, dominoHeight, dominoDepth);
+    dominoGeometryA.translate(0, dominoHeight/2, -dominoDepth/2);
+    const dominoMaterialA = new THREE.MeshPhongMaterial({ color: 0x000000 });
+    const outlineMaterialA = new THREE.LineBasicMaterial({ color: 0xffffff });
+
+    const dominoGeometryB = dominoGeometryA.clone();
+    const dominoMaterialB = new THREE.MeshPhongMaterial({ color: 0xffffff });
+    const outlineMaterialB = new THREE.LineBasicMaterial({ color: 0x000000 });
+
+    // -----------------------------
+    // Domino Pair Management (Each Pair = Left & Right Domino)
+    // -----------------------------
+    let dominoPairs = [];
+    let globalMaxZ = 0;
+    const columnOffset = 4.0;
+
+    function createDominoPair(zPos) {
+      const groupA = new THREE.Group();
+      groupA.position.set(-columnOffset/2, 0, zPos);
+      const meshA = new THREE.Mesh(dominoGeometryA, dominoMaterialA);
+      meshA.castShadow = true;
+      meshA.receiveShadow = true;
+      groupA.add(meshA);
+      const edgesA = new THREE.EdgesGeometry(dominoGeometryA);
+      const lineA = new THREE.LineSegments(edgesA, outlineMaterialA);
+      groupA.add(lineA);
+      scene.add(groupA);
+
+      const groupB = new THREE.Group();
+      groupB.position.set(columnOffset/2, 0, zPos);
+      const meshB = new THREE.Mesh(dominoGeometryB, dominoMaterialB);
+      meshB.castShadow = true;
+      meshB.receiveShadow = true;
+      groupB.add(meshB);
+      const edgesB = new THREE.EdgesGeometry(dominoGeometryB);
+      const lineB = new THREE.LineSegments(edgesB, outlineMaterialB);
+      groupB.add(lineB);
+      scene.add(groupB);
+
+      return { groupA, groupB, state: 'standing', triggered: false, z: zPos, multiplierA: 1.0, multiplierB: 1.0 };
+    }
+
+    // -----------------------------
+    // Initial Domino Pair Generation
+    // -----------------------------
+    const initialMinZ = 0;
+    const initialMaxZ = 20;
+    for (let z = initialMinZ; z <= initialMaxZ; z += dominoSpacing) {
+      const pair = createDominoPair(z);
+      dominoPairs.push(pair);
+      globalMaxZ = z;
+    }
+    dominoPairs.sort((a, b) => a.z - b.z);
+    dominoPairs[0].state = 'falling';
+
+    // -----------------------------
+    // Domino Generation Buffer & Camera Target Smoothing
+    // -----------------------------
+    const bufferForward = 100;
+    let smoothedTargetPos = new THREE.Vector3(0, 0, correctedWaveSpeed * chainProgress);
+    const smoothingFactor = 0.1;
+
+    // -----------------------------
+    // Tap Interaction Handling
+    // -----------------------------
+    renderer.domElement.addEventListener("pointerdown", (event) => {
+      lastInteractionTime = performance.now() / 1000;
+      const x = event.clientX;
+      const width = window.innerWidth;
+      if (x < width / 3) {
+        cameraRotation += Math.PI / 4;
+        console.log("Left tap: +45°");
+      } else if (x > width * 2 / 3) {
+        cameraRotation -= Math.PI / 4;
+        console.log("Right tap: -45°");
+      } else {
+        simulationPaused = !simulationPaused;
+        console.log("Center tap: Simulation " + (simulationPaused ? "paused" : "resumed"));
+      }
+    });
+
+    // -----------------------------
+    // Ground Plane
+    // -----------------------------
+    const groundSize = 100;
+    const planeGeometry = new THREE.PlaneGeometry(groundSize, groundSize);
+    const planeMaterial = new THREE.MeshPhongMaterial({ color: 0x808080, side: THREE.DoubleSide });
+    const plane = new THREE.Mesh(planeGeometry, planeMaterial);
+    plane.rotation.x = -Math.PI / 2;
+    plane.receiveShadow = false;
+    scene.add(plane);
+
+    // -----------------------------
+    // Ambient Light (Restored)
+    // -----------------------------
+    const ambientLight = new THREE.AmbientLight(0x404040, 1);
+    scene.add(ambientLight);
+
+    // -----------------------------
+    // Directional Light (From the Front)
+    // -----------------------------
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(-10, 20, 10);
+    directionalLight.target.position.set(0, 0, 0);
+    scene.add(directionalLight.target);
+    directionalLight.castShadow = true;
+    scene.add(directionalLight);
+
+    // -----------------------------
+    // Clipping Planes (Prevent Overflow Beyond Field)
+    // -----------------------------
+    const fieldHalfSize = groundSize / 2;
+    const leftPlane = new THREE.Plane(new THREE.Vector3(1, 0, 0), 0);
+    const rightPlane = new THREE.Plane(new THREE.Vector3(-1, 0, 0), 0);
+    const frontPlane = new THREE.Plane(new THREE.Vector3(0, 0, -1), 0);
+    const backPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+    // -----------------------------
+    // Domino Deletion
+    // -----------------------------
+    const safeMargin = 5.0;
+    function deleteOldDominoes(safeThreshold) {
+      let removeCount = 0;
+      for (let i = 0; i < dominoPairs.length; i++) {
+        if (dominoPairs[i].z < safeThreshold) {
+          removeCount++;
+        } else {
+          break;
+        }
+      }
+      if (removeCount > 51) {
+        dominoPairs.splice(0, removeCount - 51);
+      }
+    }
+
+    // -----------------------------
+    // Simulation Update Function
+    // -----------------------------
+    function updateSimulation(dt) {
+      if (!simulationPaused) {
+        chainProgress += correctedWaveSpeed * chainSpeedMultiplier * dt;
+        const progressZ = chainProgress;
+        while (globalMaxZ < progressZ + bufferForward) {
+          let newZ = globalMaxZ + dominoSpacing;
+          let pair = createDominoPair(newZ);
+          dominoPairs.push(pair);
+          globalMaxZ = newZ;
+        }
+
+        let activePair = null;
+        for (let i = 0; i < dominoPairs.length; i++) {
+          if (dominoPairs[i].state === 'falling') {
+            activePair = dominoPairs[i];
+            break;
+          }
+        }
+        const safeThreshold = activePair ? activePair.z - safeMargin : progressZ;
+        deleteOldDominoes(safeThreshold);
+
+        for (let i = 0; i < dominoPairs.length; i++) {
+          let pair = dominoPairs[i];
+          if (pair.state === 'falling') {
+            pair.groupA.rotation.x += fallingSpeed * dt;
+            pair.groupB.rotation.x += fallingSpeed * dt;
+            if (pair.groupA.rotation.x > maxRotation) {
+              pair.groupA.rotation.x = maxRotation;
+              pair.groupB.rotation.x = maxRotation;
+              pair.state = 'fallen';
+            }
+            if (!pair.triggered && pair.groupA.rotation.x > triggerAngle) {
+              if (i + 1 < dominoPairs.length && dominoPairs[i + 1].state === 'standing') {
+                dominoPairs[i + 1].state = 'falling';
+              }
+              pair.triggered = true;
+            }
+          }
+        }
+        if (!dominoPairs.some(pair => pair.state === 'falling')) {
+          for (let i = 0; i < dominoPairs.length; i++) {
+            if (dominoPairs[i].state === 'standing') {
+              dominoPairs[i].state = 'falling';
+              console.log("Forced domino pair at z =", dominoPairs[i].z, "to falling");
+              break;
+            }
+          }
+        }
+      }
+
+      const globalTime = clockGlobal.getElapsedTime();
+      if (globalTime - lastInteractionTime > 10) {
+        let candidates = possibleAngles.filter(angle => Math.abs(angle - cameraRotation) > 0.0001);
+        if (!candidates.includes(Math.PI / 2)) candidates.push(Math.PI / 2);
+        if (!candidates.includes(-Math.PI / 2)) candidates.push(-Math.PI / 2);
+        const newAngle = candidates[Math.floor(Math.random() * candidates.length)];
+        const key = newAngle.toFixed(5);
+        randomAngleCounts[key]++;
+        cameraRotation = newAngle;
+        console.log("Random switch to angle:", newAngle, "Count:", randomAngleCounts[key]);
+        lastInteractionTime = globalTime;
+      }
+    }
+
+    // -----------------------------
+    // Rendering Function
+    // -----------------------------
+    const tempVec = new THREE.Vector3();
+    function renderFrame() {
+      let activePair = null;
+      for (let i = 0; i < dominoPairs.length; i++) {
+        if (dominoPairs[i].state === 'falling') {
+          activePair = dominoPairs[i];
+          break;
+        }
+      }
+
+      let targetZ = activePair ? activePair.z : chainProgress;
+      const centerOffset = 2.0;
+      let adjustedTargetZ = targetZ + centerOffset;
+
+      // Smooth interpolation of camera target
+      tempVec.set(0, 0, adjustedTargetZ);
+      smoothedTargetPos.lerp(tempVec, smoothingFactor);
+
+      // Apply rotation and compute new camera position
+      tempVec.set(
+        normalOffset.x * Math.cos(cameraRotation) - normalOffset.z * Math.sin(cameraRotation),
+        normalOffset.y,
+        normalOffset.x * Math.sin(cameraRotation) + normalOffset.z * Math.cos(cameraRotation)
+      );
+      const desiredCamPos = smoothedTargetPos.clone().add(tempVec);
+      camera.position.copy(desiredCamPos);
+      camera.lookAt(smoothedTargetPos);
+
+      // Update clipping planes based on camera view
+      leftPlane.constant = -(camera.position.x - fieldHalfSize);
+      rightPlane.constant = camera.position.x + fieldHalfSize;
+      frontPlane.constant = camera.position.z + fieldHalfSize;
+      backPlane.constant = -(camera.position.z - fieldHalfSize);
+      renderer.clippingPlanes = [leftPlane, rightPlane, frontPlane, backPlane];
+
+      // Update directional light position and target
+      directionalLight.target.position.copy(smoothedTargetPos);
+      directionalLight.target.updateMatrixWorld();
+      tempVec.set(-10, 20, 10);
+      directionalLight.position.copy(smoothedTargetPos).add(tempVec);
+
+      // Keep the ground under the camera
+      plane.position.x = camera.position.x;
+      plane.position.z = camera.position.z;
+
+      renderer.render(scene, camera);
+    }
+
+    // -----------------------------
+    // Main Animation Loop
+    // -----------------------------
+    function animate() {
+      requestAnimationFrame(animate);
+      const now = clockGlobal.getElapsedTime();
+      let dt = now - lastFrameTime;
+      lastFrameTime = now;
+      accumulator += dt;
+
+      // Fixed time-step simulation
+      while (accumulator >= fixedTimeStep) {
+        updateSimulation(fixedTimeStep);
+        accumulator -= fixedTimeStep;
+      }
+
+      renderFrame();
+    }
+
+    animate();
+  </script>
+</body>
+</html>
