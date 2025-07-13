@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>3D Figure-Eight Course Simulation</title>
+    <style>
+      body { margin: 0; overflow: hidden; background-color: #000; }
+      canvas { display: block; }
+    </style>
+  </head>
+  <body>
+    <!-- Three.js r128 CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+      // Global variables
+      let currentCameraIndex = 0, cameraAngleCounts = [1,0,0,0,0,0,0,0];
+      let lastTapTime = Date.now(), switchedAtIntersection = false, lapCount = 0, previousTCenter = null;
+      let initialRotationSetLeft = false, initialRotationSetRight = false;
+      let isOverhead = false;
+      let previousCameraRotationOffset = 0; // Stores the view angle before overhead mode
+      
+      // Initialize scene, camera and renderer
+      const scene = new THREE.Scene();
+      const camera = new THREE.PerspectiveCamera(80, window.innerWidth/window.innerHeight, 0.1, 5000);
+      camera.position.set(0, 25, -40);
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+      
+      // Ambient light
+      scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+      
+      // Directional light (high-res / fine-tuned for shadows)
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+      directionalLight.castShadow = true;
+      directionalLight.shadow.mapSize.width = 4096;
+      directionalLight.shadow.mapSize.height = 4096;
+      directionalLight.shadow.camera.near = 1;
+      directionalLight.shadow.camera.far = 1000;
+      directionalLight.shadow.camera.left = -500;
+      directionalLight.shadow.camera.right = 500;
+      directionalLight.shadow.camera.top = 500;
+      directionalLight.shadow.camera.bottom = -500;
+      directionalLight.shadow.bias = -0.00005;
+      directionalLight.shadow.normalBias = 0.001;
+      scene.add(directionalLight);
+      
+      // Shadow-camera helper (hidden)
+      const shadowCameraHelper = new THREE.CameraHelper(directionalLight.shadow.camera);
+      shadowCameraHelper.visible = false;
+      scene.add(shadowCameraHelper);
+      
+      // Wire-frame dome surrounding the entire course
+      const domeGeometry = new THREE.SphereGeometry(320, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2);
+      const domeMaterial = new THREE.MeshBasicMaterial({ 
+        color: 0xffffff, wireframe: true, opacity: 0.2, transparent: true 
+      });
+      const domeMesh = new THREE.Mesh(domeGeometry, domeMaterial);
+      domeMesh.position.y = 0;
+      scene.add(domeMesh);
+      
+      // Custom Gerono (figure-eight) curve
+      class EightCurve extends THREE.Curve {
+        constructor(scale = 250) { super(); this.scale = scale; }
+        getPoint(t) {
+          const angle = t * Math.PI * 2;
+          const x = this.scale * Math.sin(angle);
+          const z = this.scale * Math.sin(angle) * Math.cos(angle);
+          return new THREE.Vector3(x, 0, z);
+        }
+        getTangent(t) {
+          const delta = 0.0001;
+          const pt1 = this.getPoint((t + delta) % 1);
+          const pt0 = this.getPoint((t - delta + 1) % 1);
+          return pt1.clone().sub(pt0).normalize();
+        }
+      }
+      const curve = new EightCurve();
+      
+      // Road-mesh generator
+      function createRoadGeometry(curve, width = 48, segments = 200) {
+        const points = curve.getPoints(segments), vertices = [], indices = [];
+        for (let i = 0; i < points.length; i++) {
+          const t = i / (points.length - 1);
+          const point = points[i];
+          const tangent = curve.getTangent(t).clone().normalize();
+          const normal = new THREE.Vector3(-tangent.z, 0, tangent.x);
+          const offset = normal.clone().multiplyScalar(width / 2);
+          const left = point.clone().add(offset);
+          const right = point.clone().sub(offset);
+          vertices.push(left.x, left.y, left.z);
+          vertices.push(right.x, right.y, right.z);
+        }
+        for (let i = 0; i < points.length - 1; i++) {
+          const idx = i * 2;
+          indices.push(idx, idx + 1, idx + 2, idx + 2, idx + 1, idx + 3);
+        }
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute("position", new THREE.Float32BufferAttribute(vertices, 3));
+        geometry.setIndex(indices);
+        geometry.computeVertexNormals();
+        return geometry;
+      }
+      const roadGeometry = createRoadGeometry(curve, 48, 200);
+      const roadMaterial = new THREE.MeshStandardMaterial({ color: 0x505050, side: THREE.DoubleSide });
+      const roadMesh = new THREE.Mesh(roadGeometry, roadMaterial);
+      roadMesh.receiveShadow = true;
+      scene.add(roadMesh);
+      
+      // Draw centre-line as dotted PointsMaterial
+      const centerLinePoints = curve.getPoints(200).map(p => new THREE.Vector3(p.x, p.y + 0.05, p.z));
+      const centerLineGeometry = new THREE.BufferGeometry().setFromPoints(centerLinePoints);
+      const pointsMaterial = new THREE.PointsMaterial({ color: 0xcccccc, size: 3, sizeAttenuation: true });
+      const centerLinePointsMesh = new THREE.Points(centerLineGeometry, pointsMaterial);
+      scene.add(centerLinePointsMesh);
+      
+      // Car-model generator (including tyres & windows)
+      function createCar(color) {
+        const car = new THREE.Group();
+        const bodyHeight = 1.125;
+        // First (lower) body section
+        const bodyGeometry = new THREE.BoxGeometry(8, bodyHeight, 4);
+        const bodyMaterial = new THREE.MeshStandardMaterial({ color: color });
+        const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+        bodyMesh.position.y = 1 + bodyHeight / 2;
+        bodyMesh.castShadow = true;
+        car.add(bodyMesh);
+        
+        // Second (trapezoidal) body section
+        const secondBodyGeometry = new THREE.BoxGeometry(4, bodyHeight, 4);
+        const posAttr = secondBodyGeometry.attributes.position;
+        const halfHeight = bodyHeight / 2;
+        for (let i = 0; i < posAttr.count; i++) {
+          const y = posAttr.getY(i);
+          if (Math.abs(y - halfHeight) < 0.001) {
+            posAttr.setX(i, posAttr.getX(i) * 0.75);
+            posAttr.setZ(i, posAttr.getZ(i) * 0.75);
+          }
+        }
+        posAttr.needsUpdate = true;
+        secondBodyGeometry.computeVertexNormals();
+        const secondBodyMaterial = new THREE.MeshStandardMaterial({ color: color });
+        const secondBodyMesh = new THREE.Mesh(secondBodyGeometry, secondBodyMaterial);
+        secondBodyMesh.position.y = 1 + bodyHeight + bodyHeight / 2;
+        secondBodyMesh.castShadow = true;
+        car.add(secondBodyMesh);
+        
+        // Helper to build a window mesh
+        function createWindowMesh(v1, v2, v3, v4) {
+          const center = new THREE.Vector3().add(v1).add(v2).add(v3).add(v4).multiplyScalar(0.25);
+          const scale = 0.88;
+          const sv1 = new THREE.Vector3().subVectors(v1, center).multiplyScalar(scale).add(center);
+          const sv2 = new THREE.Vector3().subVectors(v2, center).multiplyScalar(scale).add(center);
+          const sv3 = new THREE.Vector3().subVectors(v3, center).multiplyScalar(scale).add(center);
+          const sv4 = new THREE.Vector3().subVectors(v4, center).multiplyScalar(scale).add(center);
+          const vertices = new Float32Array([
+            sv1.x, sv1.y, sv1.z,
+            sv2.x, sv2.y, sv2.z,
+            sv3.x, sv3.y, sv3.z,
+            sv4.x, sv4.y, sv4.z,
+          ]);
+          const geometry = new THREE.BufferGeometry();
+          geometry.setAttribute("position", new THREE.BufferAttribute(vertices, 3));
+          geometry.setIndex([0, 1, 2, 0, 2, 3]);
+          geometry.computeVertexNormals();
+          const material = new THREE.MeshStandardMaterial({ color: 0x222222, side: THREE.DoubleSide });
+          const mesh = new THREE.Mesh(geometry, material);
+          mesh.castShadow = true;
+          return mesh;
+        }
+        
+        // Front window
+        const h = bodyHeight;
+        const front_v1 = new THREE.Vector3(-2, -h/2, 2);
+        const front_v2 = new THREE.Vector3(2, -h/2, 2);
+        const front_v3 = new THREE.Vector3(1.5, h/2, 1.5);
+        const front_v4 = new THREE.Vector3(-1.5, h/2, 1.5);
+        const frontWindow = createWindowMesh(front_v1, front_v2, front_v3, front_v4);
+        let normal = new THREE.Vector3().subVectors(front_v2, front_v1)
+                                         .cross(new THREE.Vector3().subVectors(front_v4, front_v1))
+                                         .normalize();
+        frontWindow.translateOnAxis(normal, 0.01);
+        secondBodyMesh.add(frontWindow);
+        
+        // Rear window
+        const back_v1 = new THREE.Vector3(-2, -h/2, -2);
+        const back_v2 = new THREE.Vector3(2, -h/2, -2);
+        const back_v3 = new THREE.Vector3(1.5, h/2, -1.5);
+        const back_v4 = new THREE.Vector3(-1.5, h/2, -1.5);
+        const backWindow = createWindowMesh(back_v1, back_v4, back_v3, back_v2);
+        normal = new THREE.Vector3().subVectors(back_v4, back_v1)
+                                    .cross(new THREE.Vector3().subVectors(back_v2, back_v1))
+                                    .normalize();
+        backWindow.translateOnAxis(normal, 0.01);
+        secondBodyMesh.add(backWindow);
+        
+        // Right-side window
+        const right_v1 = new THREE.Vector3(2, -h/2, 2);
+        const right_v2 = new THREE.Vector3(2, -h/2, -2);
+        const right_v3 = new THREE.Vector3(1.5, h/2, -1.5);
+        const right_v4 = new THREE.Vector3(1.5, h/2, 1.5);
+        const rightWindow = createWindowMesh(right_v1, right_v2, right_v3, right_v4);
+        normal = new THREE.Vector3().subVectors(right_v2, right_v1)
+                                    .cross(new THREE.Vector3().subVectors(right_v4, right_v1))
+                                    .normalize();
+        rightWindow.translateOnAxis(normal, 0.01);
+        secondBodyMesh.add(rightWindow);
+        
+        // Left-side window
+        const left_v1 = new THREE.Vector3(-2, -h/2, 2);
+        const left_v2 = new THREE.Vector3(-2, -h/2, -2);
+        const left_v3 = new THREE.Vector3(-1.5, h/2, -1.5);
+        const left_v4 = new THREE.Vector3(-1.5, h/2, 1.5);
+        const leftWindow = createWindowMesh(left_v1, left_v4, left_v3, left_v2);
+        normal = new THREE.Vector3().subVectors(left_v4, left_v1)
+                                    .cross(new THREE.Vector3().subVectors(left_v2, left_v1))
+                                    .normalize();
+        leftWindow.translateOnAxis(normal, 0.01);
+        secondBodyMesh.add(leftWindow);
+        
+        // Tyres
+        const wheelGeometry = new THREE.CylinderGeometry(0.8, 0.8, 0.5, 16);
+        const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x333333 });
+        function createWheel(x, y, z) {
+          const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+          wheel.rotation.x = Math.PI / 2;
+          wheel.position.set(x, y, z);
+          wheel.castShadow = true;
+          return wheel;
+        }
+        car.add(createWheel(3, 0.8, -2));
+        car.add(createWheel(3, 0.8, 2));
+        car.add(createWheel(-3, 0.8, -2));
+        car.add(createWheel(-3, 0.8, 2));
+        
+        return car;
+      }
+      
+      // Instantiate and place cars
+      const carLeft  = createCar(0xcccccc);
+      const carRight = createCar(0x555555);
+      carLeft.traverse(child  => { if(child.isMesh) child.castShadow = true; });
+      carRight.traverse(child => { if(child.isMesh) child.castShadow = true; });
+      const carLeftContainer  = new THREE.Group();
+      const carRightContainer = new THREE.Group();
+      carLeftContainer.add(carLeft);
+      carRightContainer.add(carRight);
+      scene.add(carLeftContainer, carRightContainer);
+      
+      // Motion parameters & camera rotation offset
+      let tLeft = 0, tRight = 0;
+      const baseSpeed = 0.05, speedVariationRange = 0.005;
+      let cameraRotationOffset = currentCameraIndex * (Math.PI / 4);
+      
+      // View-angle switching by tap area (left / center / right thirds)
+      document.addEventListener("pointerdown", (e) => {
+        const tapX = e.clientX;
+        const width = window.innerWidth;
+        
+        if (tapX < width / 3) {
+          // Left third → rotate view left
+          cameraRotationOffset -= Math.PI / 4;
+          isOverhead = false;
+        } else if (tapX > (2 * width / 3)) {
+          // Right third → rotate view right
+          cameraRotationOffset += Math.PI / 4;
+          isOverhead = false;
+        } else {
+          // Center → toggle overhead mode
+          if (!isOverhead) {
+            previousCameraRotationOffset = cameraRotationOffset;
+            isOverhead = true;
+          } else {
+            cameraRotationOffset = previousCameraRotationOffset;
+            isOverhead = false;
+            lastTapTime = Date.now();
+          }
+        }
+        lastTapTime = Date.now();
+      });
+      
+      // Random camera-angle switch (normal mode only)
+      function updateRandomCameraAngle(now) {
+        if (!isOverhead && now - lastTapTime > 10000) {
+          let candidateIndices = [];
+          for (let i = 0; i < 8; i++) {
+            if (i !== currentCameraIndex) candidateIndices.push(i);
+          }
+          let minCount = Infinity;
+          let chosenIndex = currentCameraIndex;
+          candidateIndices.forEach(i => {
+            if (cameraAngleCounts[i] < minCount) {
+              minCount = cameraAngleCounts[i];
+              chosenIndex = i;
+            }
+          });
+          currentCameraIndex = chosenIndex;
+          cameraRotationOffset = currentCameraIndex * (Math.PI / 4);
+          cameraAngleCounts[chosenIndex]++;
+          lastTapTime = now;
+        }
+      }
+      
+      // Offset & rotation-correction parameters
+      const offsetDistance = 12, additional = 6, maxCorrection = Math.PI / 12, scaleFactor = 200, rotationSpeed = 15;
+      const clock = new THREE.Clock();
+      
+      // Light-update smoothing factor
+      const lightLerpFactor = 0.01;
+      
+      function animate() {
+        requestAnimationFrame(animate);
+        const dt = clock.getDelta(), now = Date.now();
+        tLeft  = (tLeft  + (baseSpeed + (Math.random() * 2 - 1) * speedVariationRange) * dt) % 1;
+        tRight = (tRight + (baseSpeed + (Math.random() * 2 - 1) * speedVariationRange) * dt) % 1;
+        const deltaT = 0.001;
+        
+        // Update left car
+        const posLeft = curve.getPoint(tLeft);
+        const tangentLeft = curve.getTangent(tLeft).normalize();
+        const leftDir = new THREE.Vector3(-tangentLeft.z, 0, tangentLeft.x).normalize();
+        let dAngle = Math.atan2(curve.getTangent((tLeft + deltaT) % 1).z, curve.getTangent((tLeft + deltaT) % 1).x)
+                   - Math.atan2(tangentLeft.z, tangentLeft.x);
+        if (dAngle > Math.PI) dAngle -= 2 * Math.PI;
+        if (dAngle < -Math.PI) dAngle += 2 * Math.PI;
+        const dynamicCurvature = Math.tanh(dAngle * scaleFactor);
+        carLeftContainer.position.copy(posLeft.clone().sub(leftDir.clone().multiplyScalar(offsetDistance - additional * dynamicCurvature)));
+        let targetRot = (-Math.atan2(tangentLeft.z, tangentLeft.x) + Math.PI) - dynamicCurvature * maxCorrection;
+        if (!initialRotationSetLeft) { 
+          carLeftContainer.rotation.y = targetRot; 
+          initialRotationSetLeft = true; 
+        } else {
+          let diff = targetRot - carLeftContainer.rotation.y;
+          while (diff > Math.PI) diff -= 2 * Math.PI;
+          while (diff < -Math.PI) diff += 2 * Math.PI;
+          carLeftContainer.rotation.y += diff * (rotationSpeed * dt);
+        }
+        
+        // Update right car
+        const posRight = curve.getPoint(tRight);
+        const tangentRight = curve.getTangent(tRight).normalize();
+        const leftDirRight = new THREE.Vector3(-tangentRight.z, 0, tangentRight.x).normalize();
+        let dAngleRight = Math.atan2(curve.getTangent((tRight + deltaT) % 1).z, curve.getTangent((tRight + deltaT) % 1).x)
+                        - Math.atan2(tangentRight.z, tangentRight.x);
+        if (dAngleRight > Math.PI) dAngleRight -= 2 * Math.PI;
+        if (dAngleRight < -Math.PI) dAngleRight += 2 * Math.PI;
+        const dynamicCurvatureRight = Math.tanh(dAngleRight * scaleFactor);
+        carRightContainer.position.copy(posRight.clone().add(leftDirRight.clone().multiplyScalar(offsetDistance + additional * dynamicCurvatureRight)));
+        let targetRotRight = (-Math.atan2(tangentRight.z, tangentRight.x) + Math.PI) - dynamicCurvatureRight * maxCorrection;
+        if (!initialRotationSetRight) { 
+          carRightContainer.rotation.y = targetRotRight; 
+          initialRotationSetRight = true; 
+        } else {
+          let diff = targetRotRight - carRightContainer.rotation.y;
+          while (diff > Math.PI) diff -= 2 * Math.PI;
+          while (diff < -Math.PI) diff += 2 * Math.PI;
+          carRightContainer.rotation.y += diff * (rotationSpeed * dt);
+        }
+        
+        // If overhead mode for >20 s without touch → exit & pick random view
+        if (isOverhead && now - lastTapTime > 20000) {
+          isOverhead = false;
+          let candidateIndices = [];
+          for (let i = 0; i < 8; i++) {
+            if (i !== currentCameraIndex) candidateIndices.push(i);
+          }
+          let minCount = Infinity;
+          let chosenIndex = currentCameraIndex;
+          candidateIndices.forEach(i => {
+            if (cameraAngleCounts[i] < minCount) {
+              minCount = cameraAngleCounts[i];
+              chosenIndex = i;
+            }
+          });
+          currentCameraIndex = chosenIndex;
+          cameraRotationOffset = currentCameraIndex * (Math.PI / 4);
+          cameraAngleCounts[chosenIndex]++;
+          lastTapTime = now;
+        }
+        
+        // Camera update (overhead vs. normal)
+        const centerPoint = new THREE.Vector3().addVectors(carLeftContainer.position, carRightContainer.position).multiplyScalar(0.5);
+        if (isOverhead) {
+          // Overhead: 400 units above centre
+          camera.position.set(centerPoint.x, centerPoint.y + 400, centerPoint.z);
+          camera.lookAt(centerPoint);
+        } else {
+          updateRandomCameraAngle(now);
+          camera.position.copy(centerPoint).add(
+            tangentRight.clone().negate().multiplyScalar(40)
+              .applyAxisAngle(new THREE.Vector3(0, 1, 0), cameraRotationOffset)
+              .add(new THREE.Vector3(0, 25, 0))
+          );
+          camera.lookAt(centerPoint);
+        }
+        
+        // Light update (smoothed)
+        const desiredLightPos = new THREE.Vector3(centerPoint.x, centerPoint.y + 300, centerPoint.z + 100);
+        directionalLight.position.lerp(desiredLightPos, lightLerpFactor);
+        const desiredTargetPos = centerPoint.clone();
+        directionalLight.target.position.lerp(desiredTargetPos, lightLerpFactor);
+        directionalLight.target.updateMatrixWorld();
+        
+        renderer.render(scene, camera);
+      }
+      animate();
+      
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
