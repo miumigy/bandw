@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>High-Precision 3D Bird Flight Simulation</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!-- Three.js r128 CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <!-- BufferGeometryUtils (for geometry merging) -->
+  <script src="https://threejs.org/examples/js/utils/BufferGeometryUtils.js"></script>
+  <script>
+    // ----- Helper Functions -----
+    // Perlin-noise implementation
+    function fade(t) { return t*t*t*(t*(t*6-15)+10); }
+    function lerp(a, b, t){ return a+t*(b-a); }
+    function grad(hash, x, y) {
+      const h = hash & 3;
+      return (h===0 ? x : h===1 ? -x : h===2 ? y : -y);
+    }
+    const permutation = [151,160,137,91,90,15,131,13,201,95,96,53,194,233,7,225,
+      140,36,103,30,69,142,8,99,37,240,21,10,23,190,6,148,
+      247,120,234,75,0,26,197,62,94,252,219,203,117,35,11,32,
+      57,177,33,88,237,149,56,87,174,20,125,136,171,168,68,175,
+      74,165,71,134,139,48,27,166,77,146,158,231,83,111,229,122,
+      60,211,133,230,220,105,92,41,55,46,245,40,244,102,143,54,
+      65,25,63,161,1,216,80,73,209,76,132,187,208,89,18,169,
+      200,196,135,130,116,188,159,86,164,100,109,198,173,186,3,64,
+      52,217,226,250,124,123,5,202,38,147,118,126,255,82,85,212,
+      207,206,59,227,47,16,58,17,182,189,28,42,223,183,170,213,
+      119,248,152,2,44,154,163,70,221,153,101,155,167,43,172,9,
+      129,22,39,253,19,98,108,110,79,113,224,232,178,185,112,104,
+      218,246,97,228,251,34,242,193,238,210,144,12,191,179,162,241,
+      81,51,145,235,249,14,239,107,49,192,214,31,181,199,106,157,
+      184,84,204,176,115,121,50,45,127,4,150,254,138,236,205,93,
+      222,114,67,29,24,72,243,141,128,195,78,66,215,61,156,180];
+    const p = new Array(512);
+    for (let i = 0; i < 512; i++){
+      p[i] = permutation[i % 256];
+    }
+    function perlin(x, y) {
+      const X = Math.floor(x) & 255;
+      const Y = Math.floor(y) & 255;
+      x -= Math.floor(x);
+      y -= Math.floor(y);
+      const u = fade(x);
+      const v = fade(y);
+      const aa = p[p[X] + Y];
+      const ab = p[p[X] + Y + 1];
+      const ba = p[p[X + 1] + Y];
+      const bb = p[p[X + 1] + Y + 1];
+      const gradAA = grad(aa, x, y);
+      const gradBA = grad(ba, x - 1, y);
+      const gradAB = grad(ab, x, y - 1);
+      const gradBB = grad(bb, x - 1, y - 1);
+      const lerpX1 = lerp(gradAA, gradBA, u);
+      const lerpX2 = lerp(gradAB, gradBB, u);
+      return lerp(lerpX1, lerpX2, v);
+    }
+    
+    // Outline-drawing helper
+    function addOutline(mesh, color) {
+      if (!mesh.geometry) return;
+      const edges = new THREE.EdgesGeometry(mesh.geometry);
+      const lineMaterial = new THREE.LineBasicMaterial({ color: color });
+      const lines = new THREE.LineSegments(edges, lineMaterial);
+      mesh.add(lines);
+    }
+    function applyOutline(object, color) {
+      if (object.isMesh) {
+        addOutline(object, color);
+      }
+      if (object.children) {
+        object.children.forEach(child => applyOutline(child, color));
+      }
+    }
+    
+    // ----- Scene, Camera, Renderer setup -----
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 10000);
+    scene.add(camera);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+    
+    const ambientLight = new THREE.AmbientLight(0x404040);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(5, 10, -7.5);
+    directionalLight.castShadow = true;
+    scene.add(directionalLight);
+    
+    // ----- Terrain generation -----
+    const terrainSize = 10000;
+    const segments = 800;
+    const planeGeometry = new THREE.PlaneBufferGeometry(terrainSize, terrainSize, segments, segments);
+    const noiseFrequency = 0.015;
+    const noiseAmplitude = 40;
+    const posArray = planeGeometry.attributes.position.array;
+    for (let i = 0; i < posArray.length; i += 3) {
+      const x = posArray[i];
+      const y = posArray[i+1];
+      const noiseValue = perlin(x * noiseFrequency, y * noiseFrequency);
+      posArray[i+2] = noiseValue * noiseAmplitude;
+    }
+    planeGeometry.attributes.position.needsUpdate = true;
+    planeGeometry.rotateX(-Math.PI/2);
+    const planeMaterial = new THREE.MeshPhongMaterial({ color: 0x999999, flatShading: true });
+    const terrainMesh = new THREE.Mesh(planeGeometry, planeMaterial);
+    terrainMesh.position.y = -2;
+    terrainMesh.receiveShadow = true;
+    scene.add(terrainMesh);
+    
+    // ----- Star generation -----
+    const starCount = 1000;
+    const starGeometry = new THREE.BufferGeometry();
+    const starPositions = new Float32Array(starCount * 3);
+    const starSizes = new Float32Array(starCount);
+    const starDistance = 2000;
+    const maxPhi = 85 * Math.PI / 180;  // ≈1.484 rad
+    for (let i = 0; i < starCount; i++) {
+      const theta = Math.random() * 2 * Math.PI;
+      const u = Math.random();
+      const phi = Math.acos( 1 - u * (1 - Math.cos(maxPhi)) );
+      starPositions[i * 3]     = starDistance * Math.sin(phi) * Math.cos(theta);
+      starPositions[i * 3 + 1] = starDistance * Math.cos(phi);
+      starPositions[i * 3 + 2] = starDistance * Math.sin(phi) * Math.sin(theta);
+      starSizes[i] = 2 + Math.random() * 3; // 2–5
+    }
+    starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+    starGeometry.setAttribute('size', new THREE.BufferAttribute(starSizes, 1));
+    const starUniforms = {
+      color: { value: new THREE.Color(0xffffff) },
+      pointScale: { value: 300.0 }
+    };
+    const starMaterial = new THREE.ShaderMaterial({
+      uniforms: starUniforms,
+      vertexShader: `
+        attribute float size;
+        uniform float pointScale;
+        void main() {
+          vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+          gl_PointSize = size * (pointScale / -mvPosition.z);
+          gl_Position = projectionMatrix * mvPosition;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 color;
+        void main() {
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `,
+      transparent: true
+    });
+    const starField = new THREE.Points(starGeometry, starMaterial);
+    scene.add(starField);
+    function updatePointScale() {
+      if (window.innerHeight > window.innerWidth) {
+        starUniforms.pointScale.value = 700.0;
+      } else {
+        starUniforms.pointScale.value = 300.0;
+      }
+    }
+    updatePointScale();
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      updatePointScale();
+    });
+    
+    // ----- Bird creation -----
+    function createBird(color) {
+      const group = new THREE.Group();
+      // Body
+      const bodyRadius = 0.4, bodyLength = 1.0;
+      const bodyGeo = new THREE.BoxGeometry(bodyRadius*2, bodyRadius*2*0.45, bodyLength);
+      const bodyMat = new THREE.MeshLambertMaterial({ color: color });
+      const bodyMesh = new THREE.Mesh(bodyGeo, bodyMat);
+      bodyMesh.castShadow = true;
+      group.add(bodyMesh);
+      // For the dark bird, cache the body bounding box
+      if (color === 0x777777) {
+        bodyGeo.computeBoundingBox();
+        group.userData.bodyBB = bodyGeo.boundingBox.clone();
+        group.userData.bodyBottom = bodyGeo.boundingBox.min.y;
+      }
+      // Head
+      const headRadius = 0.35;
+      const headGeo = new THREE.DodecahedronGeometry(headRadius);
+      const headMat = new THREE.MeshLambertMaterial({ color: color });
+      const headMesh = new THREE.Mesh(headGeo, headMat);
+      headMesh.castShadow = true;
+      headMesh.position.set(0, 0, -(bodyLength/2+bodyRadius-0.05));
+      group.add(headMesh);
+      // Beak
+      const beakHeight = 0.4, beakRadius = 0.15;
+      const beakGeo = new THREE.ConeGeometry(beakRadius, beakHeight, 4);
+      const beakMat = new THREE.MeshLambertMaterial({ color: color });
+      const beakMesh = new THREE.Mesh(beakGeo, beakMat);
+      beakMesh.castShadow = true;
+      beakMesh.rotation.x = -Math.PI/2-0.2;
+      beakMesh.position.set(0, -0.1, -(headRadius+beakHeight/2)+0.1);
+      headMesh.add(beakMesh);
+      // Tail
+      const tailGeo = (function(){
+        const shape = new THREE.Shape();
+        shape.moveTo(0, -1.8);
+        shape.lineTo(-1, 0);
+        shape.lineTo(1, 0);
+        shape.lineTo(0, -1.8);
+        const extrudeSettings = { steps: 1, depth: 0.3, bevelEnabled: false };
+        const geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+        geo.rotateX(Math.PI/2);
+        geo.translate(0, 0, 1);
+        return geo;
+      })();
+      const tailMat = new THREE.MeshLambertMaterial({ color: color });
+      const tailMesh = new THREE.Mesh(tailGeo, tailMat);
+      tailMesh.castShadow = true;
+      tailMesh.scale.set(0.6, 0.6, 0.6);
+      tailMesh.position.set(0, 0, bodyLength/2+0.2);
+      tailMesh.name = "tail";
+      group.add(tailMesh);
+      // Wings & other appendages
+      function createWingSegment(length, width, thickness) {
+        const geo = new THREE.BoxGeometry(length, thickness, width);
+        const mat = new THREE.MeshLambertMaterial({ color: color });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.castShadow = true;
+        return mesh;
+      }
+      const offsetScale = 1/1.2;
+      // Left wing
+      const leftWingGroup = new THREE.Group();
+      leftWingGroup.position.set(-0.75, 0, 0);
+      leftWingGroup.scale.x = 0.7;
+      group.add(leftWingGroup);
+      const leftUpperWing = createWingSegment(1.8, 0.9, 0.1);
+      leftUpperWing.position.set(-0.75 * offsetScale, 0, 0);
+      leftWingGroup.add(leftUpperWing);
+      const leftElbowGroup = new THREE.Group();
+      leftElbowGroup.position.set(-1.5 * offsetScale, 0, 0.2);
+      leftUpperWing.add(leftElbowGroup);
+      const leftLowerWing = createWingSegment(1.44, 0.75, 0.1);
+      leftLowerWing.position.set(-0.6 * offsetScale, 0, 0);
+      leftElbowGroup.add(leftLowerWing);
+      const leftWristGroup = new THREE.Group();
+      leftWristGroup.position.set(-1.2 * offsetScale, 0, 0);
+      leftLowerWing.add(leftWristGroup);
+      const leftWingTip = createWingSegment(0.96, 0.6, 0.1);
+      leftWingTip.position.set(-0.4 * offsetScale, 0, 0.2);
+      leftWristGroup.add(leftWingTip);
+      // Right wing
+      const rightWingGroup = new THREE.Group();
+      rightWingGroup.position.set(0.75, 0, 0);
+      rightWingGroup.scale.x = 0.7;
+      group.add(rightWingGroup);
+      const rightUpperWing = createWingSegment(1.8, 0.9, 0.1);
+      rightUpperWing.position.set(0.75 * offsetScale, 0, 0);
+      rightWingGroup.add(rightUpperWing);
+      const rightElbowGroup = new THREE.Group();
+      rightElbowGroup.position.set(1.5 * offsetScale, 0, 0.2);
+      rightUpperWing.add(rightElbowGroup);
+      const rightLowerWing = createWingSegment(1.44, 0.75, 0.1);
+      rightLowerWing.position.set(0.6 * offsetScale, 0, 0);
+      rightElbowGroup.add(rightLowerWing);
+      const rightWristGroup = new THREE.Group();
+      rightWristGroup.position.set(1.2 * offsetScale, 0, 0);
+      rightLowerWing.add(rightWristGroup);
+      const rightWingTip = createWingSegment(0.96, 0.6, 0.1);
+      rightWingTip.position.set(0.4 * offsetScale, 0, 0.2);
+      rightWristGroup.add(rightWingTip);
+      
+      group.userData.zSpeedBase = 0.05;
+      group.userData.zSpeedAmplitude = 0.1;
+      group.userData.zSpeedNoiseFrequency = 0.5 + Math.random() * 0.5;
+      group.userData.zSpeedNoiseOffset = Math.random() * 100;
+      
+      return {
+        group: group,
+        bodyMesh: bodyMesh,
+        leftWingGroup: leftWingGroup,
+        leftElbowGroup: leftElbowGroup,
+        leftWristGroup: leftWristGroup,
+        rightWingGroup: rightWingGroup,
+        rightElbowGroup: rightElbowGroup,
+        rightWristGroup: rightWristGroup
+      };
+    }
+    
+    // ----- Scene construction -----
+    const baseBirdY = 30;
+    const whiteBird = createBird(0xffffff);
+    whiteBird.group.position.set(-4, baseBirdY, 0);
+    scene.add(whiteBird.group);
+    
+    const blackBird = createBird(0x777777);
+    blackBird.group.position.set(4, baseBirdY, 0);
+    scene.add(blackBird.group);
+    // Draw outlines for every dark-bird part
+    applyOutline(blackBird.group, 0x606060);
+    
+    // ----- Camera controls & auto-switching -----
+    const horizontalAngles = [0, Math.PI/4, Math.PI/2, 3*Math.PI/4, Math.PI, 5*Math.PI/4, 3*Math.PI/2, 7*Math.PI/4];
+    const verticalAngles = [-1.47, -0.785, 0, 0.785, 1.47];
+    let horizontalAngle = Math.PI/4, verticalAngle = Math.PI/4;
+    const viewAngleCounts = {};
+    viewAngleCounts[horizontalAngle.toFixed(3) + "," + verticalAngle.toFixed(3)] = 1;
+    
+    let autoSwitchTimer;
+    function resetAutoSwitchTimer(){
+      if(autoSwitchTimer) clearTimeout(autoSwitchTimer);
+      autoSwitchTimer = setTimeout(autoSwitchViewAngle, 10000);
+    }
+    function autoSwitchViewAngle(){
+      const possibleAngles = [];
+      horizontalAngles.forEach(h => {
+        verticalAngles.forEach(v => {
+          const key = h.toFixed(3) + "," + v.toFixed(3);
+          possibleAngles.push({ h: h, v: v, key: key, count: viewAngleCounts[key] || 0 });
+        });
+      });
+      const currentKey = horizontalAngle.toFixed(3) + "," + verticalAngle.toFixed(3);
+      const candidates = possibleAngles.filter(angle => angle.key !== currentKey);
+      const minCount = Math.min(...candidates.map(a => a.count));
+      const leastUsed = candidates.filter(a => a.count === minCount);
+      const chosen = leastUsed[Math.floor(Math.random()*leastUsed.length)];
+      horizontalAngle = chosen.h;
+      verticalAngle = chosen.v;
+      if (viewAngleCounts[chosen.key] === undefined) {
+        viewAngleCounts[chosen.key] = 0;
+      }
+      viewAngleCounts[chosen.key]++;
+      resetAutoSwitchTimer();
+    }
+    resetAutoSwitchTimer();
+    
+    window.addEventListener('pointerdown', (event)=>{
+      resetAutoSwitchTimer();
+      const x = event.clientX, y = event.clientY;
+      const width = window.innerWidth, height = window.innerHeight;
+      if (x < width/3) {
+        horizontalAngle -= Math.PI/4;
+      } else if (x > width*2/3) {
+        horizontalAngle += Math.PI/4;
+      } else {
+        if (y < height/2) {
+          verticalAngle = Math.min(verticalAngle+Math.PI/4, Math.PI/2-0.1);
+        } else {
+          verticalAngle = Math.max(verticalAngle-Math.PI/4, -Math.PI/2+0.1);
+        }
+      }
+      horizontalAngle = (horizontalAngle+2*Math.PI) % (2*Math.PI);
+      const key = horizontalAngle.toFixed(3) + "," + verticalAngle.toFixed(3);
+      if (viewAngleCounts[key] === undefined) {
+        viewAngleCounts[key] = 0;
+      }
+      viewAngleCounts[key]++;
+    });
+    
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      updatePointScale();
+    });
+    
+    // ----- Bird animation -----
+    const flapFrequency = 8;
+    const shoulderAmplitude = Math.PI/8;
+    const elbowAmplitude = Math.PI/10;
+    const wristAmplitude = Math.PI/20;
+    const phaseElbow = Math.PI/6;
+    const phaseWrist = Math.PI/3;
+    const bobAmplitude = 0.5;
+    
+    function updateBird(birdObj, time, phaseOffset) {
+      const baseSpeed = birdObj.group.userData.zSpeedBase;
+      const noiseValue = perlin(time * birdObj.group.userData.zSpeedNoiseFrequency + birdObj.group.userData.zSpeedNoiseOffset, 0);
+      const zSpeedVariation = birdObj.group.userData.zSpeedAmplitude * noiseValue;
+      birdObj.group.position.z -= (baseSpeed + zSpeedVariation);
+      birdObj.group.position.y = baseBirdY + bobAmplitude * Math.sin(time * flapFrequency + phaseOffset);
+      const shoulderAngle = shoulderAmplitude * Math.sin(time * flapFrequency + phaseOffset);
+      birdObj.leftWingGroup.rotation.z = shoulderAngle;
+      birdObj.rightWingGroup.rotation.z = -shoulderAngle;
+      const elbowAngle = elbowAmplitude * Math.sin(time * flapFrequency + phaseElbow + phaseOffset);
+      birdObj.leftElbowGroup.rotation.z = elbowAngle;
+      birdObj.rightElbowGroup.rotation.z = -elbowAngle;
+      const wristAngle = wristAmplitude * Math.sin(time * flapFrequency + phaseWrist + phaseOffset);
+      birdObj.leftWristGroup.rotation.z = wristAngle;
+      birdObj.rightWristGroup.rotation.z = -wristAngle;
+      const adductionAngle = (Math.PI/18) * Math.sin(time * flapFrequency + phaseOffset);
+      birdObj.leftWingGroup.rotation.y = adductionAngle;
+      birdObj.rightWingGroup.rotation.y = -adductionAngle;
+    }
+    
+    const clock = new THREE.Clock();
+    function animate() {
+      requestAnimationFrame(animate);
+      const time = clock.getElapsedTime();
+      updateBird(whiteBird, time, 0);
+      updateBird(blackBird, time, Math.PI);
+      const focus = new THREE.Vector3(
+        (whiteBird.group.position.x + blackBird.group.position.x) / 2,
+        baseBirdY,
+        (whiteBird.group.position.z + blackBird.group.position.z) / 2
+      );
+      const camDistance = 15;
+      const camX = focus.x + camDistance * Math.cos(verticalAngle) * Math.sin(horizontalAngle);
+      const camY = baseBirdY + camDistance * Math.sin(verticalAngle);
+      const camZ = focus.z + camDistance * Math.cos(verticalAngle) * Math.cos(horizontalAngle);
+      camera.position.set(camX, camY, camZ);
+      camera.lookAt(focus);
+      
+      // Keep the star field centered on the camera
+      starField.position.copy(camera.position);
+      
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
