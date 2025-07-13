@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Missile Launch Simulation</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+  <!-- Three.js r128 CDN -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+  <script>
+    // --- Scene, Camera, Renderer ---
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    const initialFov = window.innerWidth < window.innerHeight ? 90 : 60;
+    const camera = new THREE.PerspectiveCamera(initialFov, window.innerWidth/window.innerHeight, 0.1, 1500);
+    camera.position.set(300, 50, 0);
+    const fieldCenter = new THREE.Vector3(0, 5, 0);
+    camera.lookAt(fieldCenter);
+
+    const renderer = new THREE.WebGLRenderer({antialias: true});
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.appendChild(renderer.domElement);
+
+    window.addEventListener('resize', () => {
+      camera.fov = window.innerWidth < window.innerHeight ? 90 : 60;
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // --- Camera movement parameters ---
+    const defaultRadius = 300;
+    const toggledRadius = 220;
+    let cameraRadius = defaultRadius;
+    let cameraAngle = 0;
+    const cameraHeight = 50;
+    const defaultLookAt = new THREE.Vector3(0, 5, 0);
+    const zoomedLookAt  = new THREE.Vector3(0, 50, 0);
+    function updateCameraPosition() {
+      camera.position.set(
+        cameraRadius * Math.cos(cameraAngle),
+        cameraHeight,
+        cameraRadius * Math.sin(cameraAngle)
+      );
+      camera.lookAt(cameraRadius === toggledRadius ? zoomedLookAt : defaultLookAt);
+    }
+
+    // --- Manage auto‐rotation candidates ---
+    const autoAngles = [];
+    const directions = [0, 45, 90, 135, 180, 225, 270, 315];
+    for (let r of [defaultRadius, toggledRadius]) {
+      for (let ang of directions) {
+        autoAngles.push({ angle: THREE.Math.degToRad(ang), radius: r, count: 0 });
+      }
+    }
+    const initCandidate = autoAngles.find(c => c.angle === 0 && c.radius === defaultRadius);
+    if (initCandidate) {
+      initCandidate.count++;
+    }
+    let lastTapTime = performance.now();
+    let autoSwitchDone = false;
+
+    // --- Ground ---
+    const groundThickness = 10;
+    const southGroundMaterial = new THREE.MeshLambertMaterial({ color: 0x111111 });
+    const southGroundGeometry = new THREE.BoxGeometry(400, groundThickness, 199);
+    const southGround = new THREE.Mesh(southGroundGeometry, southGroundMaterial);
+    southGround.position.set(0, -groundThickness/2, -100.5);
+    southGround.receiveShadow = true;
+    scene.add(southGround);
+
+    const northGroundMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
+    const northGroundGeometry = new THREE.BoxGeometry(400, groundThickness, 199);
+    const northGround = new THREE.Mesh(northGroundGeometry, northGroundMaterial);
+    northGround.position.set(0, -groundThickness/2, 100.5);
+    northGround.receiveShadow = true;
+    scene.add(northGround);
+
+    // Border line
+    const groove = new THREE.Mesh(
+      new THREE.BoxGeometry(400, 1, 2),
+      new THREE.MeshLambertMaterial({ color: 0x000000 })
+    );
+    groove.position.set(0, -0.6, 0);
+    scene.add(groove);
+
+    // --- Launch platforms and upper decks ---
+    const platformA = new THREE.Mesh(
+      new THREE.BoxGeometry(130, 1.25, 7.5),
+      new THREE.MeshLambertMaterial({ color: 0x333333 })
+    );
+    platformA.position.set(0, 0.625, -195);
+    platformA.castShadow = true;
+    platformA.receiveShadow = true;
+    scene.add(platformA);
+
+    // For the north turret, lower the brightness by changing color to 0x222222
+    const platformB = new THREE.Mesh(
+      new THREE.BoxGeometry(130, 1.25, 7.5),
+      new THREE.MeshLambertMaterial({ color: 0x222222 })
+    );
+    platformB.position.set(0, 0.625, 195);
+    platformB.castShadow = true;
+    platformB.receiveShadow = true;
+    scene.add(platformB);
+
+    const topBoxA = new THREE.Mesh(
+      new THREE.BoxGeometry(125, 1.25, 3.75),
+      new THREE.MeshLambertMaterial({ color: 0x333333 })
+    );
+    topBoxA.position.set(0, 1.875, -195);
+    topBoxA.castShadow = true;
+    topBoxA.receiveShadow = true;
+    scene.add(topBoxA);
+
+    // Also darken the north upper deck
+    const topBoxB = new THREE.Mesh(
+      new THREE.BoxGeometry(125, 1.25, 3.75),
+      new THREE.MeshLambertMaterial({ color: 0x222222 })
+    );
+    topBoxB.position.set(0, 1.875, 195);
+    topBoxB.castShadow = true;
+    topBoxB.receiveShadow = true;
+    scene.add(topBoxB);
+
+    // --- Lighting ---
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(10, 20, 10);
+    directionalLight.castShadow = true;
+    directionalLight.shadow.camera.near = 1;
+    directionalLight.shadow.camera.far  = 500;
+    directionalLight.shadow.mapSize.set(1024, 1024);
+    scene.add(directionalLight);
+
+    // --- Bomb & Explosion settings ---
+    const bombGeometry = new THREE.SphereGeometry(1, 32, 32);
+    const bombMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    const explosionDuration        = 3.0;
+    const explosionFinalScaleIncrement = 17;
+    const gravity = new THREE.Vector3(0, -9.8, 0);
+
+    let bombs = [];
+    let explosions = [];
+    let impactedTrails = [];
+    const fadeTime       = 3.0;    // Trail fade-out after impact
+    const maxTrailPoints = 50;
+    const trailWidth     = 2;      // Diameter of trail tube
+
+    // --- Trail texture ---
+    function createTubeTrailTexture() {
+      const width = 256, height = 1;
+      const canvas = document.createElement('canvas');
+      canvas.width  = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      const grad = ctx.createLinearGradient(0, 0, width, 0);
+      grad.addColorStop(0, 'rgba(200,200,200,0)');
+      grad.addColorStop(1, 'rgba(200,200,200,0.3)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, width, height);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.magFilter = THREE.LinearFilter;
+      texture.minFilter = THREE.LinearFilter;
+      return texture;
+    }
+    const tubeTrailTexture = createTubeTrailTexture();
+
+    function createTubeTrailMaterial() {
+      return new THREE.MeshBasicMaterial({
+        map: tubeTrailTexture,
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.NormalBlending
+      });
+    }
+
+    // --- Launch bomb from a given launcher ---
+    function launchBombFromPoint(launcher) {
+      const bombMesh = new THREE.Mesh(bombGeometry, bombMaterial);
+      let bombVelocity = new THREE.Vector3();
+      const randomFactor = Math.random()*0.2 + 0.8;
+      const baseSpeed    = 66 * randomFactor;
+      const theta = Math.PI/3;
+      const phi   = (Math.random()*60 - 30)*Math.PI/180;
+      const vVertical   = baseSpeed * Math.sin(theta);
+      const vHorizontal = baseSpeed * Math.cos(theta);
+      let Vx = vHorizontal * Math.sin(phi);
+      let Vz = vHorizontal * Math.cos(phi);
+      if (launcher === "A") {
+        bombMesh.position.set(0,5,-195);
+      } else if (launcher === "B") {
+        bombMesh.position.set(0,5,195);
+        Vz = -Vz;
+      }
+      bombVelocity.set(Vx, vVertical, Vz);
+
+      const trailPositions = [];
+      const tubeMesh = new THREE.Mesh(new THREE.BufferGeometry(), createTubeTrailMaterial());
+      scene.add(tubeMesh);
+
+      bombs.push({
+        mesh: bombMesh,
+        velocity: bombVelocity,
+        trailPositions,
+        trailMesh: tubeMesh,
+        impacted: false
+      });
+      scene.add(bombMesh);
+      scheduleNextLaunch(launcher);
+    }
+
+    // First launch immediately
+    launchBombFromPoint("A");
+    launchBombFromPoint("B");
+
+    function scheduleNextLaunch(launcher) {
+      const delay = Math.random()*(5-0.5)+0.5;
+      setTimeout(() => { launchBombFromPoint(launcher); }, delay*1000);
+    }
+
+    // --- Scorch mark texture ---
+    function createScorchMarkTexture() {
+      const size = 256;
+      const canvas = document.createElement('canvas');
+      canvas.width  = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      const grad = ctx.createRadialGradient(size/2, size/2, 0, size/2, size/2, size/2);
+      grad.addColorStop(0,   'rgba(200,200,200,1)');
+      grad.addColorStop(0.5, 'rgba(120,120,120,0.8)');
+      grad.addColorStop(1,   'rgba(0,0,0,0)');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0,0,size,size);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.minFilter = THREE.LinearFilter;
+      texture.magFilter = THREE.LinearFilter;
+      texture.wrapS = THREE.ClampToEdgeWrapping;
+      texture.wrapT = THREE.ClampToEdgeWrapping;
+      return texture;
+    }
+
+    // --- Camera control by tap ---
+    function handleTap(event) {
+      event.preventDefault();
+      let clientX;
+      if (event.touches && event.touches.length > 0) {
+        clientX = event.touches[0].clientX;
+      } else {
+        clientX = event.clientX;
+      }
+      if (clientX < window.innerWidth/3) {
+        cameraAngle += THREE.Math.degToRad(45);
+      } else if (clientX > 2*window.innerWidth/3) {
+        cameraAngle -= THREE.Math.degToRad(45);
+      } else {
+        cameraRadius = (cameraRadius === defaultRadius) ? toggledRadius : defaultRadius;
+      }
+      updateCameraPosition();
+      lastTapTime = performance.now();
+    }
+    window.addEventListener('click', handleTap, false);
+    window.addEventListener('touchstart', handleTap, false);
+
+    // --- Update tube trail geometry ---
+    function updateTubeTrail(obj, dt) {
+      const pts = obj.trailPositions;
+      if (pts.length < 2) return;
+      if (obj.impacted) {
+        let last = pts[pts.length-1];
+        last.y = THREE.MathUtils.lerp(last.y, 0, smoothstep(0, fadeTime, dt));
+      }
+      const curve = new THREE.CatmullRomCurve3(pts, false);
+      const segments = Math.max(10, pts.length*2);
+      const tubeGeom = new THREE.TubeGeometry(curve, segments, trailWidth/2, 8, false);
+      obj.trailMesh.geometry.dispose();
+      obj.trailMesh.geometry = tubeGeom;
+    }
+
+    function updateImpactedTrails(currentTime, dt) {
+      for (let i = impactedTrails.length - 1; i >= 0; i--) {
+        const trailObj = impactedTrails[i];
+        const age = (currentTime - trailObj.impactTime)/1000;
+        const t   = smoothstep(0, fadeTime, age);
+        const alpha = 1 - t;
+        trailObj.trailMesh.material.opacity = 0.3 * alpha;
+        updateTubeTrail(trailObj, dt);
+        if (alpha <= 0.01) {
+          scene.remove(trailObj.trailMesh);
+          impactedTrails.splice(i, 1);
+        }
+      }
+    }
+
+    function smoothstep(edge0, edge1, x) {
+      x = Math.max(0, Math.min(1, (x - edge0)/(edge1 - edge0)));
+      return x*x*(3 - 2*x);
+    }
+
+    // --- Auto camera change: first after 30s, then every 10s ---
+    function autoChangeCamera(currentTime) {
+      let threshold = autoSwitchDone ? 10000 : 30000;
+      if (currentTime - lastTapTime > threshold) {
+        if (!autoSwitchDone && cameraAngle===0 && cameraRadius===defaultRadius) {
+          const candidates = autoAngles.filter(c => !(c.angle===0 && c.radius===defaultRadius));
+          const minCount   = Math.min(...candidates.map(s => s.count));
+          const filtered   = candidates.filter(c => c.count === minCount);
+          const chosen     = filtered[Math.floor(Math.random()*filtered.length)];
+          cameraAngle = chosen.angle;
+          cameraRadius = chosen.radius;
+          updateCameraPosition();
+          chosen.count++;
+          autoSwitchDone = true;
+          lastTapTime = currentTime;
+        } else if (autoSwitchDone) {
+          const minCount = Math.min(...autoAngles.map(s => s.count));
+          const candidates = autoAngles.filter(c => c.count === minCount);
+          const chosen     = candidates[Math.floor(Math.random()*candidates.length)];
+          cameraAngle = chosen.angle;
+          cameraRadius = chosen.radius;
+          updateCameraPosition();
+          chosen.count++;
+          lastTapTime = currentTime;
+        }
+      }
+    }
+
+    let prevTime = performance.now();
+    function animate() {
+      requestAnimationFrame(animate);
+      const currentTime = performance.now();
+      const dt = (currentTime - prevTime)/1000;
+      prevTime = currentTime;
+
+      autoChangeCamera(currentTime);
+
+      // Update bombs
+      for (let i = bombs.length - 1; i >= 0; i--) {
+        let bombObj = bombs[i];
+        bombObj.velocity.add(gravity.clone().multiplyScalar(dt));
+        bombObj.mesh.position.add(bombObj.velocity.clone().multiplyScalar(dt));
+        bombObj.trailPositions.push(bombObj.mesh.position.clone());
+        if (bombObj.trailPositions.length > maxTrailPoints) {
+          bombObj.trailPositions.shift();
+        }
+        updateTubeTrail(bombObj, dt);
+
+        // Impact detection
+        if (bombObj.mesh.position.y <= 1) {
+          const impactPos = new THREE.Vector3(
+            bombObj.mesh.position.x, 0, bombObj.mesh.position.z
+          );
+          // Scorch mark
+          const scarGeometry = new THREE.CircleGeometry(9,32);
+          const scarTexture  = createScorchMarkTexture();
+          const scarMaterial = new THREE.MeshBasicMaterial({
+            map: scarTexture,
+            transparent: true,
+            side: THREE.DoubleSide,
+            depthWrite: false
+          });
+          const scarMesh = new THREE.Mesh(scarGeometry, scarMaterial);
+          scarMesh.rotation.x = -Math.PI/2;
+          scarMesh.position.copy(impactPos);
+          scarMesh.position.y = 0.01;
+          scene.add(scarMesh);
+
+          // Explosion
+          const explosionGeometry = new THREE.SphereGeometry(
+            1,32,32,0,Math.PI*2,0,Math.PI/2
+          );
+          const explosionMaterial = new THREE.MeshBasicMaterial({
+            color: 0xffffff, transparent: true, opacity: 1
+          });
+          const explosionMesh = new THREE.Mesh(explosionGeometry, explosionMaterial);  
+          explosionMesh.position.copy(impactPos);
+          explosionMesh.renderOrder = 2;
+          explosions.push({ mesh: explosionMesh, startTime: currentTime });
+          scene.add(explosionMesh);
+
+          bombObj.impacted = true;
+          scene.remove(bombObj.mesh);
+          bombs.splice(i, 1);
+          bombObj.impactTime = currentTime;
+          impactedTrails.push(bombObj);
+        }
+      }
+
+      updateImpactedTrails(currentTime, dt);
+
+      // Update explosions
+      for (let i = explosions.length - 1; i >= 0; i--) {
+        let expObj = explosions[i];
+        const elapsed = (currentTime - expObj.startTime)/1000;
+        if (elapsed < explosionDuration) {
+          const scale = 1 + (elapsed/explosionDuration)*explosionFinalScaleIncrement;
+          expObj.mesh.scale.set(scale,scale,scale);
+          expObj.mesh.material.opacity = 1 - (elapsed/explosionDuration);
+        } else {
+          scene.remove(expObj.mesh);
+          explosions.splice(i, 1);
+        }
+      }
+
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
