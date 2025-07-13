@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <!-- Responsive layout -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3-D Simulation: Multiple Spheres Rolling Inside a Box</title>
+    <style>
+      body { margin: 0; overflow: hidden; }
+    </style>
+  </head>
+  <body>
+    <!-- Three.js (r128) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+      /* ------------------------------------------------------------------
+         Scene setup – dark-gray background (0x303030)
+      ------------------------------------------------------------------ */
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x303030);
+
+      /* ------------------------------------------------------------------
+         Camera
+      ------------------------------------------------------------------ */
+      const camera = new THREE.PerspectiveCamera(
+        45,
+        window.innerWidth / window.innerHeight,
+        1,
+        1000
+      );
+      camera.position.set(0, 150, 300);
+      camera.lookAt(0, 0, 0);
+
+      /* ------------------------------------------------------------------
+         Renderer + shadows
+      ------------------------------------------------------------------ */
+      const renderer = new THREE.WebGLRenderer({ antialias: true });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setClearColor(0x303030);
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      document.body.appendChild(renderer.domElement);
+
+      /* ------------------------------------------------------------------
+         Lights
+      ------------------------------------------------------------------ */
+      scene.add(new THREE.AmbientLight(0xffffff, 0.2));
+
+      const dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
+      dirLight.position.set(200, 300, 100);
+      dirLight.castShadow = true;
+      dirLight.shadow.mapSize.set(2048, 2048);
+      dirLight.shadow.camera.near = 0.5;
+      dirLight.shadow.camera.far  = 1000;
+      dirLight.shadow.camera.left   = -300;
+      dirLight.shadow.camera.right  =  300;
+      dirLight.shadow.camera.top    =  300;
+      dirLight.shadow.camera.bottom = -300;
+      scene.add(dirLight);
+
+      /* ------------------------------------------------------------------
+         Box – size 120, bright-gray faces, semi-transparent
+      ------------------------------------------------------------------ */
+      const boxSize = 120;
+      const boxGeom = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
+      const boxMats = [
+        0xffffff, 0xf8f8f8, 0xf0f0f0,
+        0xe8e8e8, 0xe0e0e0, 0xd8d8d8
+      ].map(col => new THREE.MeshPhongMaterial({
+        color: col, side: THREE.DoubleSide, transparent: true, opacity: 0.15
+      }));
+      const boxMesh = new THREE.Mesh(boxGeom, boxMats);
+      boxMesh.receiveShadow = true;
+      scene.add(boxMesh);
+
+      /* ------------------------------------------------------------------
+         Sphere parameters – radius 15
+      ------------------------------------------------------------------ */
+      const ballRadius   = 15;
+      const ballGeom     = new THREE.SphereGeometry(ballRadius, 32, 32);
+      const matWhite = new THREE.MeshPhongMaterial({
+        color: 0xfefefe, specular: 0x040404, shininess: 10, emissive: 0x444444
+      });
+      const matBlack = new THREE.MeshPhongMaterial({
+        color: 0x000000, specular: 0x111111, shininess: 30
+      });
+
+      /* Box internal boundaries (per axis) */
+      const boundaries = {
+        xMin: -(boxSize / 2 - ballRadius),
+        xMax:  (boxSize / 2 - ballRadius),
+        yMin: -(boxSize / 2 - ballRadius),
+        yMax:  (boxSize / 2 - ballRadius),
+        zMin: -(boxSize / 2 - ballRadius),
+        zMax:  (boxSize / 2 - ballRadius)
+      };
+
+      /* ------------------------------------------------------------------
+         Physics constants
+      ------------------------------------------------------------------ */
+      const gravity   = new THREE.Vector3(0, -0.5, 0);
+      const friction  = 0.99;
+      let restitution = 0.95;               // updated by taps
+      const maxSpeed  = 20;
+
+      /* Sphere states */
+      const balls      = [];
+      const ballMeshes = [];
+
+      /* Utility: random in range */
+      const rand = (min, max) => Math.random() * (max - min) + min;
+
+      /* Create a sphere */
+      function createBall(color) {
+        const pos = new THREE.Vector3(
+          rand(boundaries.xMin, boundaries.xMax),
+          rand(boundaries.yMin, boundaries.yMax),
+          rand(boundaries.zMin, boundaries.zMax)
+        );
+        const vel = new THREE.Vector3(
+          (Math.random() * 2 - 1) * 2, 0, (Math.random() * 2 - 1) * 2
+        );
+        return { pos, vel, color };
+      }
+
+      /* Spawn two white + two black spheres */
+      ["white", "black", "white", "black"].forEach(col => {
+        const b = createBall(col);
+        balls.push(b);
+
+        const mesh = new THREE.Mesh(ballGeom, col === "white" ? matWhite : matBlack);
+        mesh.castShadow = mesh.receiveShadow = true;
+        ballMeshes.push(mesh);
+        scene.add(mesh);
+      });
+
+      /* ------------------------------------------------------------------
+         Box rotation speeds
+      ------------------------------------------------------------------ */
+      const rotHigh = { x: 0.03,  y: 0.045, z: 0.015 };
+      const rotLow  = { x: 0.005, y: 0.0075, z: 0.0025 };
+      const rotStop = { x: 0,     y: 0,      z: 0 };
+
+      let currentRot = { ...rotLow }; // default = low-speed
+
+      /* ------------------------------------------------------------------
+         Tap / click handler – change rotation & restitution
+           top third    → fast   + elastic (1.0)
+           middle third → stop   + 0.95
+           bottom third → slow   + 0.95
+      ------------------------------------------------------------------ */
+      document.addEventListener('click', e => {
+        resetAutoTimer();
+        const h = window.innerHeight;
+        if (e.clientY < h / 3) {
+          currentRot = { ...rotHigh }; restitution = 1.0;
+        } else if (e.clientY > (h * 2) / 3) {
+          currentRot = { ...rotLow };  restitution = 0.95;
+        } else {
+          currentRot = { ...rotStop }; restitution = 0.95;
+        }
+      });
+
+      /* ------------------------------------------------------------------
+         Auto-switch timer (30 s inactivity toggles speed)
+      ------------------------------------------------------------------ */
+      let autoTimer;
+      function resetAutoTimer() {
+        if (autoTimer) clearTimeout(autoTimer);
+        autoTimer = setTimeout(() => {
+          const isLow = currentRot.x === rotLow.x && currentRot.y === rotLow.y;
+          currentRot  = isLow ? { ...rotHigh } : { ...rotLow };
+          restitution = isLow ? 1.0 : 0.95;
+          resetAutoTimer();
+        }, 30000);
+      }
+      resetAutoTimer();
+
+      /* ------------------------------------------------------------------
+         Velocity reflection with restitution and speed clamp
+      ------------------------------------------------------------------ */
+      function reflect(v, n) {
+        const d = v.dot(n);
+        const r = v.clone().sub(n.clone().multiplyScalar(2 * d)).multiplyScalar(restitution);
+        if (r.length() > maxSpeed) r.setLength(maxSpeed);
+        return r;
+      }
+
+      /* Single-ball update */
+      function updateBall(ball) {
+        ball.vel.multiplyScalar(friction);
+        ball.vel.add(gravity);
+        ball.pos.add(ball.vel);
+
+        /* Convert to box local space */
+        const local = ball.pos.clone().sub(boxMesh.position)
+                               .applyQuaternion(boxMesh.quaternion.clone().invert());
+        const orig  = local.clone();
+        let hit = false;
+
+        if (local.x < boundaries.xMin) { local.x = boundaries.xMin; hit = true; }
+        if (local.x > boundaries.xMax) { local.x = boundaries.xMax; hit = true; }
+        if (local.y < boundaries.yMin) { local.y = boundaries.yMin; hit = true; }
+        if (local.y > boundaries.yMax) { local.y = boundaries.yMax; hit = true; }
+        if (local.z < boundaries.zMin) { local.z = boundaries.zMin; hit = true; }
+        if (local.z > boundaries.zMax) { local.z = boundaries.zMax; hit = true; }
+
+        if (hit) {
+          const corrLocal = local.clone().sub(orig);
+          const corrWorld = corrLocal.clone().applyQuaternion(boxMesh.quaternion);
+          if (corrWorld.length() > 0) {
+            const n = corrWorld.clone().normalize();
+            ball.vel = reflect(ball.vel, n);
+          }
+          ball.pos.add(corrWorld);
+        }
+      }
+
+      /* Inter-sphere collision */
+      function collideSpheres() {
+        for (let i = 0; i < balls.length; i++) {
+          for (let j = i + 1; j < balls.length; j++) {
+            const diff = balls[j].pos.clone().sub(balls[i].pos);
+            const dist = diff.length();
+            if (dist < ballRadius * 2 && dist > 0) {
+              const overlap = ballRadius * 2 - dist;
+              const n = diff.clone().normalize();
+              balls[i].vel = reflect(balls[i].vel, n);
+              balls[j].vel = reflect(balls[j].vel, n.clone().negate());
+              const corr = n.multiplyScalar(overlap / 2);
+              balls[i].pos.add(corr.clone().negate());
+              balls[j].pos.add(corr);
+            }
+          }
+        }
+      }
+
+      function physicsStep() {
+        balls.forEach(updateBall);
+        collideSpheres();
+      }
+
+      /* ------------------------------------------------------------------
+         Animation loop
+      ------------------------------------------------------------------ */
+      function animate() {
+        requestAnimationFrame(animate);
+
+        /* Update box rotation */
+        boxMesh.rotation.x += currentRot.x;
+        boxMesh.rotation.y += currentRot.y;
+        boxMesh.rotation.z += currentRot.z;
+
+        physicsStep();
+
+        /* Sync meshes */
+        ballMeshes.forEach((m, i) => m.position.copy(balls[i].pos));
+
+        renderer.render(scene, camera);
+      }
+      animate();
+
+      /* Resize handler */
+      window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+    </script>
+  </body>
+</html>
