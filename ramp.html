@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Natural Back-and-Forth Motion – Ramp & Ball Simulation</title>
+  <style>
+    body { margin: 0; overflow: hidden; }
+    canvas { display: block; }
+  </style>
+</head>
+<body>
+  <!-- Three.js CDN (r128) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+  (function(){
+    // ----- Global variables -----
+    let currentViewName = "front";
+    
+    // White ball motion parameters (state xWhite ∈ [-1,1])
+    // Initialize slightly inside the end
+    let xWhite = 0.99;       
+    let dirWhite = -1;       // Initially move xWhite in the decreasing direction
+    
+    // ----- Initialize scene, camera, renderer -----
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 0, 5);
+    camera.up.set(0,1,0);
+    camera.lookAt(0, 0, 0);
+    
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+    
+    // ----- Ambient light & directional light -----
+    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(1,1,1);
+    scene.add(directionalLight);
+    
+    // ----- Define ramp curve (stretched horizontally) -----
+    class RampCurve extends THREE.Curve {
+      constructor(){ super(); }
+      getPoint(t) {
+        // Original x0 = -1 + 2*t  (x0 ∈ [-1,1])
+        const x0 = -1 + 2 * t;
+        const scaleX = 1.5;    // Horizontal stretch factor (width 2→3)
+        const x = scaleX * x0;
+        const a = 2;           // Vertical scale
+        const y = a * (x0 * x0 - 1);
+        return new THREE.Vector3(x, y, 0);
+      }
+    }
+    const rampCurve = new RampCurve();
+    
+    // ----- Display ramp at fixed scale (independent of viewport) -----
+    const fixedScale = 1;
+    function updateRampScale() {
+      rampMesh.scale.set(fixedScale, fixedScale, fixedScale);
+      rampMesh.position.set(0, 0.5 * fixedScale, 0);
+      
+      if(window.innerWidth > window.innerHeight && currentViewName !== "top") {
+        const aspect = window.innerWidth / window.innerHeight;
+        const rampBoxWidth = 3;   // RampCurve: scaleX=1.5 → x ∈ [-1.5,1.5]
+        const rampBoxHeight = 2;  // y ∈ [-2, 0]
+        const d = camera.position.distanceTo(new THREE.Vector3(0,0,0));
+        const fovVertical = 2 * Math.atan(rampBoxHeight / (2 * d)) * (180/Math.PI);
+        const fovHorizontal = 2 * Math.atan(rampBoxWidth / (2 * d)) * (180/Math.PI) / aspect;
+        const requiredFov = 2 * Math.atan(2 / d) * (180/Math.PI);
+        camera.fov = Math.max(Math.max(fovVertical, fovHorizontal), requiredFov);
+        camera.updateProjectionMatrix();
+      } else {
+        camera.fov = 60;
+        camera.updateProjectionMatrix();
+      }
+    }
+    
+    // ----- Define cross-section shape for ramp -----
+    const rampWidth = 1.0;   // Cross-section width
+    const rampThickness = 0.025;
+    const shape = new THREE.Shape();
+    shape.moveTo(-rampWidth/2, 0);
+    shape.lineTo(rampWidth/2, 0);
+    shape.lineTo(rampWidth/2, -rampThickness);
+    shape.lineTo(-rampWidth/2, -rampThickness);
+    shape.lineTo(-rampWidth/2, 0);
+    
+    const extrudeSettings = {
+      steps: 100,
+      bevelEnabled: false,
+      extrudePath: rampCurve
+    };
+    const rampGeometry = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+    const rampMaterial = new THREE.MeshPhongMaterial({ color: 0x808080 });
+    const rampMesh = new THREE.Mesh(rampGeometry, rampMaterial);
+    scene.add(rampMesh);
+    
+    // ----- Create balls -----
+    const ballRadius = 0.15;
+    const ballGeometry = new THREE.SphereGeometry(ballRadius, 32, 32);
+    const whiteMaterial = new THREE.MeshPhongMaterial({ color: 0xffffff });
+    // Lower brightness for black ball to 0x333333 and increase shininess
+    const blackMaterial = new THREE.MeshPhongMaterial({ color: 0x333333, shininess: 100 });
+    const ballMeshWhite = new THREE.Mesh(ballGeometry, whiteMaterial);
+    const ballMeshBlack = new THREE.Mesh(ballGeometry, blackMaterial);
+    scene.add(ballMeshWhite);
+    scene.add(ballMeshBlack);
+    
+    updateRampScale();
+    window.addEventListener('resize', function(){
+      camera.aspect = window.innerWidth/window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      updateRampScale();
+    });
+    
+    // ----- Camera views configuration & auto-switch -----
+    const cameraViews = [
+      { name: "front", pos: { x: 0, y: 0, z: 5 },    up: new THREE.Vector3(0,1,0) },
+      { name: "right", pos: { x: 3, y: 3, z: 3 },    up: new THREE.Vector3(0,1,0) },
+      { name: "left",  pos: { x: -3, y: 3, z: 3 },   up: new THREE.Vector3(0,1,0) },
+      { name: "top",   pos: { x: 0, y: 5, z: 0 },    up: new THREE.Vector3(0,0,-1) }
+    ];
+    let autoIndex = 0;
+    let lastInteractionTime = performance.now();
+    
+    function setCameraPosition(position, up, viewName) {
+      camera.position.set(position.x, position.y, position.z);
+      camera.up.copy(up);
+      camera.lookAt(0, 0, 0);
+      currentViewName = viewName;
+      updateRampScale();
+    }
+    
+    document.addEventListener('click', function(event) {
+      lastInteractionTime = performance.now();
+      const screenWidth = window.innerWidth;
+      const screenHeight = window.innerHeight;
+      const x = event.clientX;
+      const y = event.clientY;
+      if (x < screenWidth / 3) {
+        setCameraPosition({ x: -3, y: 3, z: 3 }, new THREE.Vector3(0,1,0), "left");
+        autoIndex = 2;
+      } else if (x > screenWidth * 2 / 3) {
+        setCameraPosition({ x: 3, y: 3, z: 3 }, new THREE.Vector3(0,1,0), "right");
+        autoIndex = 1;
+      } else {
+        if(y < screenHeight/2) {
+          setCameraPosition({ x: 0, y: 5, z: 0 }, new THREE.Vector3(0,0,-1), "top");
+        } else {
+          setCameraPosition({ x: 0, y: 0, z: 5 }, new THREE.Vector3(0,1,0), "front");
+          autoIndex = 0;
+        }
+      }
+    });
+    
+    // ----- Compute 3D contact point via raycasting -----
+    const raycaster = new THREE.Raycaster();
+    function computeBallCenterFromRay(t) {
+      const tClamped = Math.max(0, Math.min(t, 1));
+      const rLocal = rampCurve.getPoint(tClamped);
+      const tangentLocal = rampCurve.getTangentAt(tClamped).clone().normalize();
+      let nLocal = new THREE.Vector3(-tangentLocal.y, tangentLocal.x, 0).normalize();
+      if(nLocal.y < 0) nLocal.negate();
+      const rWorld = rLocal.clone().applyMatrix4(rampMesh.matrixWorld);
+      const nWorld = nLocal.clone().transformDirection(rampMesh.matrixWorld).normalize();
+      const rayOrigin = rWorld.clone().add(nWorld.clone().multiplyScalar(0.2));
+      const rayDirection = nWorld.clone().negate();
+      raycaster.set(rayOrigin, rayDirection);
+      const intersects = raycaster.intersectObject(rampMesh);
+      if(intersects.length > 0){
+        const intersectionPoint = intersects[0].point;
+        return intersectionPoint.clone().add(nWorld.clone().multiplyScalar(ballRadius));
+      }
+      return rWorld.clone().add(nWorld.clone().multiplyScalar(ballRadius));
+    }
+    
+    // ----- Update back-and-forth motion based on energy conservation -----
+    // dxWhite/dt = dirWhite * scaleFactor * sqrt(4*g*(1 - xWhite^2)/(1+4*xWhite^2))
+    const g_val = 9.8;
+    const epsilon = 0.0001;
+    const scaleFactor = 0.7;
+    function updateState(dt) {
+      const effective = (xWhite > 1 ? 1 : (xWhite < -1 ? -1 : xWhite));
+      const velocity = scaleFactor * Math.sqrt(4 * g_val * (1 - effective*effective) / (1 + 4 * effective*effective));
+      xWhite += dirWhite * velocity * dt;
+      if(xWhite >= 1) { xWhite = 1 - epsilon; dirWhite = -1; }
+      if(xWhite <= -1) { xWhite = -1 + epsilon; dirWhite = +1; }
+    }
+    
+    // ----- Animation loop -----
+    let lastTime = null;
+    let prevTWhite = ((xWhite) + 1) / 2;
+    let prevTBlack = ((-xWhite) + 1) / 2;
+    const offsetZWhite = rampWidth/4;
+    const offsetZBlack = -rampWidth/4;
+    
+    function animate(time) {
+      if(!lastTime) lastTime = time;
+      let dt = (time - lastTime) / 1000;
+      lastTime = time;
+      
+      // Sub‐step integration for stability
+      const dt_fixed = 0.008;
+      while(dt > dt_fixed) {
+        updateState(dt_fixed);
+        dt -= dt_fixed;
+      }
+      if(dt > 0) { updateState(dt); }
+      
+      const tParamWhite = (xWhite + 1) / 2;
+      const tParamBlack = ((-xWhite) + 1) / 2;
+      
+      // Update white ball
+      const ballCenterWhite = computeBallCenterFromRay(tParamWhite);
+      ballCenterWhite.z += offsetZWhite;
+      ballMeshWhite.position.copy(ballCenterWhite);
+      const contactPointWhite = rampCurve.getPoint(tParamWhite);
+      const dAngleWhite = contactPointWhite.distanceTo(rampCurve.getPoint(prevTWhite)) / ballRadius;
+      const tangentWhite = rampCurve.getTangentAt(tParamWhite).clone().normalize();
+      const dqWhite = new THREE.Quaternion().setFromAxisAngle(tangentWhite, dAngleWhite);
+      ballMeshWhite.quaternion.premultiply(dqWhite);
+      prevTWhite = tParamWhite;
+      
+      // Update black ball
+      const ballCenterBlack = computeBallCenterFromRay(tParamBlack);
+      ballCenterBlack.z += offsetZBlack;
+      ballMeshBlack.position.copy(ballCenterBlack);
+      const contactPointBlack = rampCurve.getPoint(tParamBlack);
+      const dAngleBlack = contactPointBlack.distanceTo(rampCurve.getPoint(prevTBlack)) / ballRadius;
+      const tangentBlack = rampCurve.getTangentAt(tParamBlack).clone().normalize();
+      const dqBlack = new THREE.Quaternion().setFromAxisAngle(tangentBlack, dAngleBlack);
+      ballMeshBlack.quaternion.premultiply(dqBlack);
+      prevTBlack = tParamBlack;
+      
+      const now = performance.now();
+      if(now - lastInteractionTime > 10000) {
+        const view = cameraViews[(++autoIndex) % cameraViews.length];
+        setCameraPosition(view.pos, view.up, view.name);
+        lastInteractionTime = now;
+      }
+      
+      renderer.render(scene, camera);
+      requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+    
+  })();
+  </script>
+</body>
+</html>
