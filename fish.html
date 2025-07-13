@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>Fish Swimming Simulation</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body { margin: 0; overflow: hidden; background: #000; }
+  </style>
+</head>
+<body>
+  <!-- Three.js CDN (r128) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script>
+    /* ====================
+       Utility Functions
+    ==================== */
+
+    /* Merge multiple BufferGeometries into one */
+    function mergeBufferGeometries(geometries) {
+      geometries = geometries.map(g => g.toNonIndexed());
+      const mergedGeometry = new THREE.BufferGeometry();
+      const attributeNames = Object.keys(geometries[0].attributes);
+      attributeNames.forEach(name => {
+        const arrays = [];
+        let itemSize = geometries[0].attributes[name].itemSize;
+        let totalLength = 0;
+        geometries.forEach(geo => {
+          const attr = geo.attributes[name];
+          arrays.push(attr.array);
+          totalLength += attr.array.length;
+        });
+        const mergedArray = new Float32Array(totalLength);
+        let offset = 0;
+        arrays.forEach(arr => {
+          mergedArray.set(arr, offset);
+          offset += arr.length;
+        });
+        mergedGeometry.setAttribute(name, new THREE.BufferAttribute(mergedArray, itemSize));
+      });
+      return mergedGeometry;
+    }
+
+    /* A small arc curve for fins */
+    class ArcCurve extends THREE.Curve {
+      constructor(){ super(); }
+      getPoint(t){
+        const angle = (t - 0.5) * Math.PI;
+        const radius = 0.001 / Math.PI;
+        const y = radius * (1 - Math.cos(angle));
+        const z = radius * Math.sin(angle);
+        return new THREE.Vector3(0, y, z);
+      }
+    }
+
+    /* ====================
+       Scene Setup
+    ==================== */
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+    scene.fog = new THREE.FogExp2(0x000000, 0.009);
+
+    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+    camera.position.set(0, 3, 5);
+    camera.lookAt(0, 0, 0);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.appendChild(renderer.domElement);
+
+    /* ====================
+       Lights Setup
+    ==================== */
+    /* Ambient hemisphere lighting */
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambientLight);
+
+    /* Sky and ground hemisphere light */
+    const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.5);
+    hemiLight.position.set(0, 200, 0);
+    scene.add(hemiLight);
+
+    /* Main directional light (casts shadows) */
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.castShadow = true;
+    directionalLight.shadow.mapSize.width = 2048;
+    directionalLight.shadow.mapSize.height = 2048;
+    directionalLight.shadow.camera.near = 0.5;
+    directionalLight.shadow.camera.far = 500;
+    directionalLight.shadow.camera.left = -200;
+    directionalLight.shadow.camera.right = 200;
+    directionalLight.shadow.camera.top = 200;
+    directionalLight.shadow.camera.bottom = -200;
+    directionalLight.position.set(50, 50, 50); // initial position (updated later)
+    directionalLight.target.position.set(0, 0, 0);
+    scene.add(directionalLight);
+    scene.add(directionalLight.target);
+
+    /* ====================
+       Sea Floor Setup
+    ==================== */
+    const segmentWidth = 100, segmentDepth = 200, initialTileCount = 6;
+    const seaFloorTiles = [];
+
+    /* Compute height function for terrain undulation */
+    function computeHeight(x, z) {
+      return 0.5 * (Math.sin(x * 0.5) * Math.cos(z * 0.5) +
+                    Math.sin(x * 0.5 + 1) * Math.cos(z * 0.5 + 1));
+    }
+
+    /* Create one tiled patch of the sea floor */
+    function createSeaFloorTile(tileX, tileZ) {
+      const geometry = new THREE.PlaneGeometry(segmentWidth, segmentDepth, 50, 50);
+      geometry.rotateX(-Math.PI / 2);
+      geometry.scale(1.05, 1.05, 1);
+      const pos = geometry.attributes.position.array;
+      for (let i = 0; i < pos.length; i += 3) {
+        const localX = pos[i], localZ = pos[i+2];
+        pos[i+1] = -5 + computeHeight(localX + tileX, localZ + tileZ);
+      }
+      geometry.attributes.position.needsUpdate = true;
+      geometry.computeVertexNormals();
+      const material = new THREE.MeshPhongMaterial({ color: 0x303030, side: THREE.DoubleSide });
+      material.fog = true;
+      material.polygonOffset = true;
+      material.polygonOffsetFactor = 1;
+      material.polygonOffsetUnits = 1;
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set(tileX, 0, tileZ);
+      mesh.receiveShadow = true;
+      return mesh;
+    }
+
+    /* Initialize a row of sea-floor tiles */
+    const startOffset = -((initialTileCount - 1) / 2) * segmentWidth;
+    for (let i = 0; i < initialTileCount; i++) {
+      const tile = createSeaFloorTile(startOffset + i * segmentWidth, 0);
+      scene.add(tile);
+      seaFloorTiles.push(tile);
+    }
+
+    /* ====================
+       Fish & Fin Creation
+    ==================== */
+
+    /* Build base fish body geometry (centered) */
+    function createFishGeometry() {
+      const shape = new THREE.Shape();
+      shape.moveTo(-1, 0);
+      shape.quadraticCurveTo(-0.6, 0.3, 0, 0.2);
+      shape.quadraticCurveTo(0.8, 0.1, 1, 0);
+      shape.quadraticCurveTo(0.8, -0.1, 0, -0.2);
+      shape.quadraticCurveTo(-0.6, -0.3, -1, 0);
+
+      const extrudeSettings = {
+        steps: 50,
+        curveSegments: 50,
+        extrudePath: new ArcCurve(),
+        bevelEnabled: false
+      };
+      let geo = new THREE.ExtrudeGeometry(shape, extrudeSettings);
+      geo.computeBoundingBox();
+      const bbox = geo.boundingBox;
+      geo.translate((-(bbox.max.x + bbox.min.x)) / 2, (-(bbox.max.y + bbox.min.y)) / 2, 0);
+      return geo;
+    }
+
+    /* Combine body plus tail, dorsal, ventral, anal, and pectoral fins */
+    function createFishCompleteGeometry() {
+      const fishGeo = createFishGeometry();
+
+      // Tail fin
+      const tailShape = new THREE.Shape();
+      tailShape.moveTo(0, 0);
+      tailShape.lineTo(-0.5, 0.3);
+      tailShape.quadraticCurveTo(-0.45, 0, -0.5, -0.3);
+      tailShape.lineTo(0, 0);
+      const tailGeo = new THREE.ExtrudeGeometry(tailShape, { steps: 1, depth: 0.01, bevelEnabled: false });
+      tailGeo.translate(-0.6, 0, -0.005);
+
+      // Dorsal fin
+      const dorsalShape = new THREE.Shape();
+      dorsalShape.moveTo(-0.15, 0.15);
+      dorsalShape.lineTo(0.3, 0.15);
+      dorsalShape.lineTo(-0.041, 0.45);
+      dorsalShape.lineTo(-0.15, 0.15);
+      const dorsalGeo = new THREE.ExtrudeGeometry(dorsalShape, { steps: 1, depth: 0.01, bevelEnabled: false });
+      dorsalGeo.translate(0, 0, 0.001);
+
+      // Ventral fin
+      const ventralShape = new THREE.Shape();
+      ventralShape.moveTo(-0.15, -0.15);
+      ventralShape.lineTo(0.3, -0.15);
+      ventralShape.lineTo(-0.041, -0.45);
+      ventralShape.lineTo(-0.15, -0.15);
+      const ventralGeo = new THREE.ExtrudeGeometry(ventralShape, { steps: 1, depth: 0.01, bevelEnabled: false });
+      ventralGeo.scale(0.8, 0.8, 0.8);
+      ventralGeo.translate(0.2, 0, -0.001);
+
+      // Anal fin (duplicate ventral)
+      const analGeo = new THREE.ExtrudeGeometry(ventralShape, { steps: 1, depth: 0.01, bevelEnabled: false });
+      analGeo.scale(0.8, 0.8, 0.8);
+      analGeo.translate(-0.3, 0, -0.001);
+
+      // Pectoral fins (left & right)
+      const pectoralShape = new THREE.Shape();
+      pectoralShape.moveTo(0, 0);
+      pectoralShape.lineTo(-0.2, 0.1);
+      pectoralShape.lineTo(-0.2, -0.1);
+      pectoralShape.lineTo(0, 0);
+      const pectoralLeftGeo = new THREE.ExtrudeGeometry(pectoralShape, { steps: 1, depth: 0.005, bevelEnabled: false });
+      pectoralLeftGeo.rotateZ(-Math.PI / 2);
+      pectoralLeftGeo.rotateY(-0.349);
+      pectoralLeftGeo.scale(1.2, 1.2, 1.2);
+      pectoralLeftGeo.translate(0.3, -0.25, -0.26);
+
+      const pectoralRightGeo = new THREE.ExtrudeGeometry(pectoralShape, { steps: 1, depth: 0.005, bevelEnabled: false });
+      pectoralRightGeo.rotateZ(-Math.PI / 2);
+      pectoralRightGeo.rotateY(0.349);
+      pectoralRightGeo.scale(1.2, 1.2, 1.2);
+      pectoralRightGeo.translate(0.3, -0.25, 0.26);
+
+      return mergeBufferGeometries([
+        fishGeo, tailGeo, dorsalGeo, ventralGeo, analGeo, pectoralLeftGeo, pectoralRightGeo
+      ]);
+    }
+
+    /* ====================
+       Fish Meshes & Groups
+    ==================== */
+    // Light-colored fish with undulation shader
+    const fishGeometry = createFishCompleteGeometry();
+    const fishMaterial = new THREE.MeshPhongMaterial({ color: 0xa0a0a0, side: THREE.DoubleSide });
+    fishMaterial.onBeforeCompile = function(shader) {
+      shader.vertexShader = `
+        uniform float time;
+        uniform float undulationStartX;
+        uniform float noseXCoord;
+        uniform float undulationAmplitude;
+        uniform float undulationFrequency;
+      ` + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `
+          vec3 transformed = vec3(position);
+          if (transformed.x < undulationStartX) {
+            float factor = 1.0 - smoothstep(noseXCoord, undulationStartX, transformed.x);
+            transformed.z += undulationAmplitude * factor * sin(undulationFrequency * time +
+                            (undulationStartX - transformed.x) * 3.14159265);
+          }
+        `
+      );
+      shader.uniforms.time = { value: 0 };
+      shader.uniforms.undulationStartX = { value: -0.3 };
+      shader.uniforms.noseXCoord = { value: -1 };
+      shader.uniforms.undulationAmplitude = { value: 0.1 };
+      shader.uniforms.undulationFrequency = { value: 10.0 };
+      fishMaterial.userData.shader = shader;
+    };
+
+    const fishMesh = new THREE.Mesh(fishGeometry, fishMaterial);
+    fishMesh.castShadow = true;
+    // Group fish slightly above the seabed (sea floor ~ –5)
+    const fishGroup = new THREE.Group();
+    fishGroup.position.set(0, -3.5, 0);
+    fishGroup.add(fishMesh);
+    scene.add(fishGroup);
+
+    // Dark‐colored fish with phase-shifted undulation
+    const darkFishMaterial = new THREE.MeshPhongMaterial({ color: 0x202020, side: THREE.DoubleSide });
+    darkFishMaterial.onBeforeCompile = function(shader) {
+      shader.uniforms.phaseShift = { value: 1.5 };
+      shader.vertexShader = `
+        uniform float time;
+        uniform float undulationStartX;
+        uniform float noseXCoord;
+        uniform float undulationAmplitude;
+        uniform float undulationFrequency;
+        uniform float phaseShift;
+      ` + shader.vertexShader;
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <begin_vertex>',
+        `
+          vec3 transformed = vec3(position);
+          if (transformed.x < undulationStartX) {
+            float factor = 1.0 - smoothstep(noseXCoord, undulationStartX, transformed.x);
+            transformed.z += undulationAmplitude * factor * sin(undulationFrequency * time +
+                            (undulationStartX - transformed.x) * 3.14159265 + phaseShift);
+          }
+        `
+      );
+      shader.uniforms.time = { value: 0 };
+      shader.uniforms.undulationStartX = { value: -0.3 };
+      shader.uniforms.noseXCoord = { value: -1 };
+      shader.uniforms.undulationAmplitude = { value: 0.1 };
+      shader.uniforms.undulationFrequency = { value: 10.0 };
+      darkFishMaterial.userData.shader = shader;
+    };
+
+    const fishMesh2 = new THREE.Mesh(fishGeometry.clone(), darkFishMaterial);
+    fishMesh2.castShadow = true;
+    const fishGroup2 = new THREE.Group();
+    fishGroup2.position.set(0, -3.5, 2);
+    fishGroup2.add(fishMesh2);
+    scene.add(fishGroup2);
+
+    /* ====================
+       Bubble Effects
+    ==================== */
+    const bubbleGroup = new THREE.Group();
+    scene.add(bubbleGroup);
+    const bubbleCount = 5000, bubbles = [];
+
+    /* Initialize a single bubble’s position and motion */
+    function initBubble(bubble) {
+      const rangeX = initialTileCount * segmentWidth * 2;
+      const rangeZ = segmentDepth * 2;
+      const randomX = fishGroup.position.x + (Math.random() - 0.5) * rangeX;
+      const randomZ = (Math.random() - 0.5) * rangeZ;
+      const yFloor = -5 + computeHeight(randomX, randomZ);
+      bubble.position.set(randomX, yFloor + 0.2, randomZ);
+      bubble.userData.phase = Math.random() * Math.PI * 2;
+      bubble.userData.freq = Math.random() * 0.5 + 0.5;
+    }
+
+    for (let i = 0; i < bubbleCount; i++) {
+      const bubbleRadius = (Math.random() * 0.03 + 0.02) * 2;
+      const bubbleGeo = new THREE.SphereGeometry(bubbleRadius, 16, 16);
+      const bubbleMat = new THREE.MeshPhongMaterial({ color: 0xaaaaaa, transparent: true, opacity: 0.7 });
+      const bubbleMesh = new THREE.Mesh(bubbleGeo, bubbleMat);
+      initBubble(bubbleMesh);
+      bubbleGroup.add(bubbleMesh);
+      bubbles.push(bubbleMesh);
+    }
+
+    /* ====================
+       Camera & View Presets
+    ==================== */
+    const viewAngles = [];
+    const phiHigh = 1.3963, phiMid = 1.0038, phiLow = 0.6113;
+    const thetaStep = 2 * Math.PI / 8;
+    [phiHigh, phiMid, phiLow].forEach(phi => {
+      for (let j = 0; j < 8; j++) {
+        viewAngles.push({ theta: -Math.PI / 2 + j * thetaStep, phi: phi });
+      }
+    });
+    let currentViewIndex = 0;
+    /* Compute initial camera offset around fishGroup, then zoom in 0.8× */
+    const initialOffset = new THREE.Vector3().subVectors(camera.position, fishGroup.position);
+    const camRadius = initialOffset.length() * 0.8;
+    const spherical = new THREE.Spherical(camRadius, viewAngles[currentViewIndex].phi, viewAngles[currentViewIndex].theta);
+
+    /* Switch camera to a preset view */
+    function switchToView(index) {
+      currentViewIndex = index;
+      spherical.theta = viewAngles[currentViewIndex].theta;
+      spherical.phi = viewAngles[currentViewIndex].phi;
+    }
+
+    /* Update camera position to look at midpoint of the two fish */
+    function updateCamera() {
+      const midpoint = new THREE.Vector3().addVectors(fishGroup.position, fishGroup2.position).multiplyScalar(0.5);
+      const offset = new THREE.Vector3().setFromSpherical(spherical);
+      camera.position.copy(midpoint.clone().add(offset));
+      camera.lookAt(midpoint);
+    }
+
+    /* ====================
+       Tap Handling for rotating/tilting camera
+    ==================== */
+    let lastTapTime = 0;
+    function handleTap(clientX, clientY) {
+      const width = window.innerWidth, height = window.innerHeight;
+      if (clientX < width / 3) {
+        spherical.theta -= Math.PI / 4;
+      } else if (clientX > width * 2 / 3) {
+        spherical.theta += Math.PI / 4;
+      } else {
+        if (clientY < height / 2) {
+          spherical.phi = Math.max(phiLow, spherical.phi - Math.PI / 4);
+        } else {
+          spherical.phi = Math.min(phiHigh, spherical.phi + Math.PI / 4);
+        }
+      }
+      /* Snap to nearest preset */
+      let closestIndex = 0, minDiff = Infinity;
+      viewAngles.forEach((preset, i) => {
+        const diff = Math.abs(spherical.theta - preset.theta) + Math.abs(spherical.phi - preset.phi);
+        if (diff < minDiff) { minDiff = diff; closestIndex = i; }
+      });
+      currentViewIndex = closestIndex;
+      lastTapTime = clock.getElapsedTime();
+      updateCamera();
+    }
+
+    renderer.domElement.addEventListener('click', event => {
+      handleTap(event.clientX, event.clientY);
+    });
+    renderer.domElement.addEventListener('touchstart', event => {
+      const touch = event.touches[0];
+      handleTap(touch.clientX, touch.clientY);
+      event.preventDefault();
+    }, { passive: false });
+
+    /* ====================
+       Animation & Updates
+    ==================== */
+    const baseSpeed = 3.0;
+    const fish1SpeedFreq = Math.random() * 2 + 0.5;
+    const fish1SpeedPhase = Math.random() * Math.PI * 2;
+    const fish2SpeedFreq = Math.random() * 2 + 0.5;
+    const fish2SpeedPhase = Math.random() * Math.PI * 2;
+    if (fishGroup.userData.posX === undefined) fishGroup.userData.posX = 0;
+    if (fishGroup2.userData.posX === undefined) fishGroup2.userData.posX = 0;
+    const clock = new THREE.Clock();
+    lastTapTime = clock.getElapsedTime();
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const delta = clock.getDelta();
+      const elapsed = clock.getElapsedTime();
+
+      /* Update shader time uniform */
+      if (fishMaterial.userData.shader) fishMaterial.userData.shader.uniforms.time.value = elapsed;
+      if (darkFishMaterial.userData.shader) darkFishMaterial.userData.shader.uniforms.time.value = elapsed;
+
+      /* Move fish forward with slight speed variation */
+      fishGroup.userData.posX += baseSpeed * (1 + 0.05 * Math.sin(elapsed * fish1SpeedFreq + fish1SpeedPhase)) * delta;
+      fishGroup2.userData.posX += baseSpeed * (1 + 0.05 * Math.sin(elapsed * fish2SpeedFreq + fish2SpeedPhase)) * delta;
+      fishGroup.position.set(fishGroup.userData.posX, -3.5, 0);
+      fishGroup2.position.set(fishGroup2.userData.posX, -3.5, 2);
+
+      /* Recycle sea-floor tiles behind and ahead of fish */
+      while (seaFloorTiles.length > 0 && seaFloorTiles[0].position.x < fishGroup.position.x - 5 * segmentWidth) {
+        const oldTile = seaFloorTiles.shift();
+        scene.remove(oldTile);
+        oldTile.geometry.dispose();
+        oldTile.material.dispose();
+      }
+      if (seaFloorTiles.length > 0) {
+        let rightmost = seaFloorTiles[seaFloorTiles.length - 1];
+        while (rightmost.position.x < fishGroup.position.x + 5 * segmentWidth) {
+          const newTile = createSeaFloorTile(rightmost.position.x + segmentWidth, 0);
+          scene.add(newTile);
+          seaFloorTiles.push(newTile);
+          rightmost = newTile;
+        }
+      }
+
+      /* Bubble rise animation with horizontal wobble */
+      bubbles.forEach(bubble => {
+        bubble.position.y += 0.06;
+        bubble.position.x += Math.sin(elapsed * bubble.userData.freq + bubble.userData.phase) * 0.03;
+        bubble.position.z += Math.cos(elapsed * bubble.userData.freq + bubble.userData.phase) * 0.03;
+        if (bubble.position.y > fishGroup.position.y + 10) initBubble(bubble);
+      });
+
+      /* Auto‐switch camera if idle >10s */
+      if (elapsed - lastTapTime > 10) {
+        let randomIndex = currentViewIndex;
+        while (randomIndex === currentViewIndex) {
+          randomIndex = Math.floor(Math.random() * viewAngles.length);
+        }
+        switchToView(randomIndex);
+        lastTapTime = elapsed;
+      }
+
+      updateCamera();
+
+      /* Update directional light to follow main fish */
+      directionalLight.position.copy(fishGroup.position).add(new THREE.Vector3(50, 50, 0));
+      directionalLight.target.position.copy(fishGroup.position);
+      directionalLight.target.updateMatrixWorld();
+
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+  </script>
+</body>
+</html>
